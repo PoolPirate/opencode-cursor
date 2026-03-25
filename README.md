@@ -1,4 +1,4 @@
-# opencode-cursor-oauth
+# @playwo/opencode-cursor-oauth
 
 OpenCode plugin that connects to Cursor's API, giving you access to Cursor
 models inside OpenCode with full tool-calling support.
@@ -11,7 +11,7 @@ Add this to `~/.config/opencode/opencode.json`:
 {
   "$schema": "https://opencode.ai/config.json",
   "plugin": [
-    "opencode-cursor-oauth"
+    "@playwo/opencode-cursor-oauth"
   ],
   "provider": {
     "cursor": {

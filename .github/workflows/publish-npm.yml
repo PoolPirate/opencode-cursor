@@ -108,9 +108,13 @@ jobs:
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
       RELEASE_TAG: v${{ needs.resolve-publish-context.outputs.release_version }}
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
       - name: Ensure GitHub release exists
         shell: bash
         run: |

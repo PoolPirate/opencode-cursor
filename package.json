@@ -1,5 +1,5 @@
 {
-  "name": "opencode-cursor-oauth",
+  "name": "@playwo/opencode-cursor-oauth",
   "version": "0.0.9",
   "description": "OpenCode plugin that connects Cursor's API to OpenCode via OAuth, model discovery, and a local OpenAI-compatible proxy.",
   "license": "MIT",
