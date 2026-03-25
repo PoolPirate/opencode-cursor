@@ -44,7 +44,7 @@ OpenAI-compatible proxy on demand and routes requests through Cursor's gRPC API.
 ## How it works
 
 1. OAuth — browser-based login to Cursor via PKCE.
-2. Model discovery — queries Cursor's gRPC API for all available models and fails plugin loading visibly if discovery does not succeed.
+2. Model discovery — queries Cursor's gRPC API for all available models; if discovery fails, the plugin disables the Cursor provider for that load and shows a visible error toast instead of crashing OpenCode.
 3. Local proxy — translates `POST /v1/chat/completions` into Cursor's
    protobuf/Connect protocol.
 4. Native tool routing — rejects Cursor's built-in filesystem/shell tools and

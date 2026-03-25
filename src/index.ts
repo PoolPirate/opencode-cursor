@@ -13,9 +13,10 @@ import {
   refreshCursorToken,
 } from "./auth";
 import { getCursorModels, type CursorModel } from "./models";
-import { startProxy } from "./proxy";
+import { startProxy, stopProxy } from "./proxy";
 
 const CURSOR_PROVIDER_ID = "cursor";
+let lastModelDiscoveryError: string | null = null;
 
 /**
  * OpenCode plugin that provides Cursor authentication and model access.
@@ -48,7 +49,27 @@ export const CursorAuthPlugin: Plugin = async (
           accessToken = refreshed.access;
         }
 
-        const models = await getCursorModels(accessToken);
+        let models: CursorModel[];
+        try {
+          models = await getCursorModels(accessToken);
+          lastModelDiscoveryError = null;
+        } catch (error) {
+          const message = error instanceof Error
+            ? error.message
+            : "Cursor model discovery failed.";
+
+          stopProxy();
+          if (provider) {
+            (provider as any).models = {};
+          }
+
+          if (message !== lastModelDiscoveryError) {
+            lastModelDiscoveryError = message;
+            await showDiscoveryFailureToast(input, message);
+          }
+
+          return buildDisabledProviderConfig(message);
+        }
 
         const port = await startProxy(async () => {
           const currentAuth = await getAuth();
@@ -190,6 +211,44 @@ function buildCursorProviderModels(
       },
     ]),
   );
+}
+
+async function showDiscoveryFailureToast(
+  input: PluginInput,
+  message: string,
+): Promise<void> {
+  try {
+    await input.client.tui.showToast({
+      body: {
+        title: "Cursor plugin disabled",
+        message,
+        variant: "error",
+        duration: 8_000,
+      },
+    });
+  } catch {}
+}
+
+function buildDisabledProviderConfig(message: string): Record<string, any> {
+  return {
+    baseURL: "http://127.0.0.1/cursor-disabled/v1",
+    apiKey: "cursor-disabled",
+    async fetch() {
+      return new Response(
+        JSON.stringify({
+          error: {
+            message,
+            type: "server_error",
+            code: "cursor_model_discovery_failed",
+          },
+        }),
+        {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+    },
+  };
 }
 
 interface ModelCost {

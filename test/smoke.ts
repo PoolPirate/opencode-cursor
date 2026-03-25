@@ -481,10 +481,17 @@ async function testDiscoveryFailureAndSuccess(
     refresh: "valid-refresh",
     expires: Date.now() + 3_600_000,
   };
+  const toasts: Array<{ title?: string; message: string; variant: string }> = [];
   const hooks = await modules.CursorAuthPlugin({
     client: {
       auth: {
         set: async () => {},
+      },
+      tui: {
+        showToast: async ({ body }: any) => {
+          toasts.push(body);
+          return true;
+        },
       },
     },
   } as any);
@@ -492,27 +499,30 @@ async function testDiscoveryFailureAndSuccess(
   const loader = hooks.auth?.loader;
   assert(loader, "Expected auth loader to be defined");
 
-  // Failed discovery should throw instead of falling back to hardcoded models.
+  // Failed discovery should disable the provider without throwing.
   modules.clearModelCache();
   backend.setDiscoveryMode("empty");
-  let discoveryError: unknown;
-  try {
-    await loader(async () => authState, provider);
-  } catch (error) {
-    discoveryError = error;
-  }
+  const degradedConfig = await loader(async () => authState, provider);
   assert(
-    discoveryError instanceof Error,
-    "Expected loader to throw when discovery fails",
+    typeof degradedConfig === "object" && degradedConfig !== null,
+    "Expected loader to return a disabled config when discovery fails",
   );
+  const degradedResponse = await degradedConfig.fetch("http://localhost/unused");
+  assertEqual(degradedResponse.status, 503, "Expected disabled config fetch to fail cleanly");
+  const degradedBody = await degradedResponse.json();
   assert(
-    discoveryError.message.includes("Cursor model discovery returned"),
-    `Expected discovery failure message to be visible, got ${String(discoveryError)}`,
+    degradedBody.error?.message?.includes("Cursor model discovery returned"),
+    `Expected disabled config fetch to expose the discovery error, got ${JSON.stringify(degradedBody)}`,
   );
   assertArrayEqual(
     Object.keys(provider.models),
-    ["stale"],
-    "Expected failed discovery to leave provider models unchanged",
+    [],
+    "Expected failed discovery to clear provider models",
+  );
+  assertEqual(toasts.length, 1, "Expected exactly one toast for discovery failure");
+  assert(
+    toasts[0]?.message.includes("Cursor model discovery returned"),
+    `Expected discovery failure message to be shown in a toast, got ${JSON.stringify(toasts)}`,
   );
 
   // Successful discovery should replace with real models
