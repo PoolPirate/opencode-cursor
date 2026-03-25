@@ -1,8 +1,3 @@
-/**
- * Cursor model discovery via GetUsableModels.
- * Uses the H2 bridge for transport and fails loudly when discovery
- * does not return usable models.
- */
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import { z } from "zod";
 import { callCursorUnaryRpc } from "./proxy";
@@ -141,7 +136,7 @@ function extractDiscoveryErrorDetail(body: Uint8Array): string | null {
     if (message && code) return `${message} (${code})`;
     if (message) return message;
     if (code) return code;
-  } catch {}
+  } catch { }
 
   return text.length > 200 ? `${text.slice(0, 197)}...` : text;
 }
