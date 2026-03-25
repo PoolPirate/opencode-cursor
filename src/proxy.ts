@@ -1060,6 +1060,12 @@ function makeHeartbeatBytes(): Uint8Array {
   return toBinary(AgentClientMessageSchema, heartbeat);
 }
 
+function scheduleBridgeEnd(bridge: CursorSession): void {
+  queueMicrotask(() => {
+    if (bridge.alive) bridge.end();
+  });
+}
+
 /**
  * Create a stateful parser for Connect protocol frames.
  * Handles buffering partial data across chunks.
@@ -1607,6 +1613,7 @@ function createBridgeStreamResponse(
               ...errorDetails(endStreamError),
             });
           }
+          scheduleBridgeEnd(bridge);
         },
       );
 
@@ -1635,16 +1642,17 @@ function createBridgeStreamResponse(
           sendSSE(makeUsageChunk());
           sendDone();
           closeController();
-        } else if (code !== 0) {
-          // Bridge died while tool calls are pending (timeout, crash, etc.).
-          // Close the SSE stream so the client doesn't hang forever.
-          sendSSE(makeChunk({ content: "\n[Error: bridge connection lost]" }));
-          sendSSE(makeChunk({}, "stop"));
-          sendSSE(makeUsageChunk());
-          sendDone();
-          closeController();
-          // Remove stale entry so the next request doesn't try to resume it.
+        } else {
           activeBridges.delete(bridgeKey);
+          if (code !== 0 && !closed) {
+            // Bridge died while tool calls are pending (timeout, crash, etc.).
+            // Close the SSE stream so the client doesn't hang forever.
+            sendSSE(makeChunk({ content: "\n[Error: bridge connection lost]" }));
+            sendSSE(makeChunk({}, "stop"));
+            sendSSE(makeUsageChunk());
+            sendDone();
+            closeController();
+          }
         }
       });
     },
@@ -1839,6 +1847,7 @@ async function collectFullResponse(
           ...errorDetails(endStreamError),
         });
       }
+      scheduleBridgeEnd(bridge);
     },
   ));
 

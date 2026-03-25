@@ -8,6 +8,7 @@ import {
 } from "../src/proto/agent_pb";
 
 type DiscoveryMode = "success" | "empty" | "auth-error";
+type RunSSEMode = "close-on-append" | "end-stream-hold";
 
 interface TestModules {
   startProxy: typeof import("../src/proxy").startProxy;
@@ -29,10 +30,12 @@ interface TestCursorBackend {
   refreshUrl: string;
   setDiscoveryMode: (mode: DiscoveryMode) => void;
   setDiscoveredModels: (models: Array<{ id: string; name: string; reasoning?: boolean }>) => void;
+  setRunSSEMode: (mode: RunSSEMode) => void;
   resetObservations: () => void;
   getDiscoveryAuthHeaders: () => string[];
   getDiscoveryRequestBodies: () => Uint8Array[];
   getRefreshAuthHeaders: () => string[];
+  getBidiAppendCount: () => number;
   close: () => Promise<void>;
 }
 
@@ -72,14 +75,24 @@ function frameConnectUnaryMessage(payload: Uint8Array): Buffer {
   return frame;
 }
 
+function frameConnectEndStreamMessage(payload: Uint8Array): Buffer {
+  const frame = Buffer.alloc(5 + payload.length);
+  frame[0] = 0b00000010;
+  frame.writeUInt32BE(payload.length, 1);
+  frame.set(payload, 5);
+  return frame;
+}
+
 async function createTestCursorBackend(): Promise<TestCursorBackend> {
   let discoveryMode: DiscoveryMode = "success";
+  let runSSEMode: RunSSEMode = "close-on-append";
   let discoveredModels: Array<{ id: string; name: string; reasoning?: boolean }> = [
     { id: "composer-2", name: "Composer 2", reasoning: true },
   ];
   const discoveryAuthHeaders: string[] = [];
   const discoveryRequestBodies: Uint8Array[] = [];
   const refreshAuthHeaders: string[] = [];
+  let bidiAppendCount = 0;
 
   const refreshServer = http.createServer((req, res) => {
     if (req.method !== "POST" || req.url !== "/auth/exchange_user_api_key") {
@@ -170,11 +183,21 @@ async function createTestCursorBackend(): Promise<TestCursorBackend> {
       }
 
       if (path === "/aiserver.v1.BidiService/BidiAppend") {
+        bidiAppendCount += 1;
         res.writeHead(200, { "Content-Type": "application/proto" });
         res.end();
-        if (pendingRunSSE) {
+
+        if (runSSEMode === "close-on-append" && pendingRunSSE) {
           pendingRunSSE.end();
           pendingRunSSE = null;
+        } else if (runSSEMode === "end-stream-hold" && pendingRunSSE && bidiAppendCount === 1) {
+          pendingRunSSE.write(frameConnectEndStreamMessage(new TextEncoder().encode("{}")));
+          setTimeout(() => {
+            try {
+              pendingRunSSE?.end();
+            } catch {}
+            pendingRunSSE = null;
+          }, 6_100);
         }
         return;
       }
@@ -195,10 +218,14 @@ async function createTestCursorBackend(): Promise<TestCursorBackend> {
     setDiscoveredModels(models) {
       discoveredModels = models;
     },
+    setRunSSEMode(mode) {
+      runSSEMode = mode;
+    },
     resetObservations() {
       discoveryAuthHeaders.length = 0;
       discoveryRequestBodies.length = 0;
       refreshAuthHeaders.length = 0;
+      bidiAppendCount = 0;
     },
     getDiscoveryAuthHeaders() {
       return [...discoveryAuthHeaders];
@@ -208,6 +235,9 @@ async function createTestCursorBackend(): Promise<TestCursorBackend> {
     },
     getRefreshAuthHeaders() {
       return [...refreshAuthHeaders];
+    },
+    getBidiAppendCount() {
+      return bidiAppendCount;
     },
     async close() {
       await Promise.all([
@@ -694,6 +724,47 @@ async function testDiscoveryFailureAndSuccess(
   console.log("[test] Discovery failure visibility and success OK");
 }
 
+async function testEndStreamStopsHeartbeats(
+  modules: TestModules,
+  backend: TestCursorBackend,
+) {
+  console.log("[test] Testing Connect end-stream bridge shutdown...");
+
+  try {
+    backend.resetObservations();
+    backend.setRunSSEMode("end-stream-hold");
+    modules.stopProxy();
+    const proxyPort = await modules.startProxy(async () => "test-token");
+    const response = await fetch(`http://localhost:${proxyPort}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "composer-2",
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    });
+
+    assertEqual(response.status, 200, "Expected streaming chat completion to succeed");
+    const body = await response.text();
+    assert(
+      body.includes("data: [DONE]"),
+      `Expected SSE stream to terminate cleanly, got ${JSON.stringify(body)}`,
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 5_500));
+    assertEqual(
+      backend.getBidiAppendCount(),
+      1,
+      "Expected proxy to stop heartbeats after receiving Connect end-stream",
+    );
+  } finally {
+    modules.stopProxy();
+    backend.setRunSSEMode("close-on-append");
+  }
+
+  console.log("[test] Connect end-stream bridge shutdown OK");
+}
+
 async function main() {
   const backend = await createTestCursorBackend();
   process.env.CURSOR_API_URL = backend.apiUrl;
@@ -709,6 +780,7 @@ async function main() {
     await testPluginLogging(modules);
     await testHttp2UnaryRpc(modules);
     await testArrayContentParsing(modules);
+    await testEndStreamStopsHeartbeats(modules, backend);
     await testExpiredTokenRefreshBeforeDiscovery(modules, backend);
     await testDiscoveryFailureAndSuccess(modules, backend);
     console.log("\n✓ All smoke tests passed");
