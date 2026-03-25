@@ -3,12 +3,26 @@ import http2 from "node:http2";
 import type { AddressInfo } from "node:net";
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import {
+  AgentClientMessageSchema,
+  AgentConversationTurnStructureSchema,
+  AgentServerMessageSchema,
+  AssistantMessageSchema,
+  ConversationStateStructureSchema,
+  ConversationStepSchema,
+  ConversationTurnStructureSchema,
   GetUsableModelsResponseSchema,
   ModelDetailsSchema,
+  UserMessageSchema,
 } from "../src/proto/agent_pb";
 
 type DiscoveryMode = "success" | "empty" | "auth-error";
-type RunSSEMode = "close-on-append" | "end-stream-hold";
+type RunSSEMode = "close-on-append" | "end-stream-hold" | "checkpoint-then-close";
+
+interface ObservedRunRequest {
+  conversationId: string;
+  turnCount: number;
+  latestUserText: string;
+}
 
 interface TestModules {
   startProxy: typeof import("../src/proxy").startProxy;
@@ -36,6 +50,7 @@ interface TestCursorBackend {
   getDiscoveryRequestBodies: () => Uint8Array[];
   getRefreshAuthHeaders: () => string[];
   getBidiAppendCount: () => number;
+  getObservedRunRequests: () => ObservedRunRequest[];
   close: () => Promise<void>;
 }
 
@@ -83,6 +98,92 @@ function frameConnectEndStreamMessage(payload: Uint8Array): Buffer {
   return frame;
 }
 
+function readVarint(bytes: Uint8Array, startOffset: number): { value: number; offset: number } {
+  let value = 0;
+  let shift = 0;
+  let offset = startOffset;
+
+  while (offset < bytes.length) {
+    const byte = bytes[offset]!;
+    value |= (byte & 0x7f) << shift;
+    offset += 1;
+    if ((byte & 0x80) === 0) {
+      return { value, offset };
+    }
+    shift += 7;
+  }
+
+  throw new Error("Invalid varint");
+}
+
+function decodeObservedRunRequest(payload: Uint8Array): ObservedRunRequest | null {
+  if (payload.length === 0 || payload[0] !== 0x0a) return null;
+
+  const { value: hexLength, offset } = readVarint(payload, 1);
+  const hexBytes = payload.subarray(offset, offset + hexLength);
+  const dataHex = new TextDecoder().decode(hexBytes);
+  if (!dataHex) return null;
+
+  const clientMessage = fromBinary(
+    AgentClientMessageSchema,
+    new Uint8Array(Buffer.from(dataHex, "hex")),
+  );
+  if (clientMessage.message.case !== "runRequest") return null;
+
+  const runRequest = clientMessage.message.value;
+  const action = runRequest.action?.action;
+  return {
+    conversationId: runRequest.conversationId ?? "",
+    turnCount: runRequest.conversationState?.turns.length ?? 0,
+    latestUserText: action?.case === "userMessageAction"
+      ? action.value.userMessage?.text ?? ""
+      : "",
+  };
+}
+
+function makeCheckpointUpdateFrame(): Buffer {
+  const userMessage = create(UserMessageSchema, {
+    text: "remembered context",
+    messageId: "test-user-message",
+  });
+  const step = create(ConversationStepSchema, {
+    message: {
+      case: "assistantMessage",
+      value: create(AssistantMessageSchema, { text: "remembered reply" }),
+    },
+  });
+  const turn = create(ConversationTurnStructureSchema, {
+    turn: {
+      case: "agentConversationTurn",
+      value: create(AgentConversationTurnStructureSchema, {
+        userMessage: toBinary(UserMessageSchema, userMessage),
+        steps: [toBinary(ConversationStepSchema, step)],
+      }),
+    },
+  });
+  const checkpoint = create(ConversationStateStructureSchema, {
+    rootPromptMessagesJson: [new Uint8Array([1])],
+    turns: [toBinary(ConversationTurnStructureSchema, turn)],
+    todos: [],
+    pendingToolCalls: [],
+    previousWorkspaceUris: [],
+    fileStates: {},
+    fileStatesV2: {},
+    summaryArchives: [],
+    turnTimings: [],
+    subagentStates: {},
+    selfSummaryCount: 0,
+    readPaths: [],
+  });
+  const serverMessage = create(AgentServerMessageSchema, {
+    message: {
+      case: "conversationCheckpointUpdate",
+      value: checkpoint,
+    },
+  });
+  return frameConnectUnaryMessage(toBinary(AgentServerMessageSchema, serverMessage));
+}
+
 async function createTestCursorBackend(): Promise<TestCursorBackend> {
   let discoveryMode: DiscoveryMode = "success";
   let runSSEMode: RunSSEMode = "close-on-append";
@@ -92,6 +193,7 @@ async function createTestCursorBackend(): Promise<TestCursorBackend> {
   const discoveryAuthHeaders: string[] = [];
   const discoveryRequestBodies: Uint8Array[] = [];
   const refreshAuthHeaders: string[] = [];
+  const observedRunRequests: ObservedRunRequest[] = [];
   let bidiAppendCount = 0;
 
   const refreshServer = http.createServer((req, res) => {
@@ -184,6 +286,8 @@ async function createTestCursorBackend(): Promise<TestCursorBackend> {
 
       if (path === "/aiserver.v1.BidiService/BidiAppend") {
         bidiAppendCount += 1;
+        const observed = decodeObservedRunRequest(new Uint8Array(Buffer.concat(chunks)));
+        if (observed) observedRunRequests.push(observed);
         res.writeHead(200, { "Content-Type": "application/proto" });
         res.end();
 
@@ -198,6 +302,10 @@ async function createTestCursorBackend(): Promise<TestCursorBackend> {
             } catch {}
             pendingRunSSE = null;
           }, 6_100);
+        } else if (runSSEMode === "checkpoint-then-close" && pendingRunSSE) {
+          pendingRunSSE.write(makeCheckpointUpdateFrame());
+          pendingRunSSE.end();
+          pendingRunSSE = null;
         }
         return;
       }
@@ -225,6 +333,7 @@ async function createTestCursorBackend(): Promise<TestCursorBackend> {
       discoveryAuthHeaders.length = 0;
       discoveryRequestBodies.length = 0;
       refreshAuthHeaders.length = 0;
+      observedRunRequests.length = 0;
       bidiAppendCount = 0;
     },
     getDiscoveryAuthHeaders() {
@@ -238,6 +347,9 @@ async function createTestCursorBackend(): Promise<TestCursorBackend> {
     },
     getBidiAppendCount() {
       return bidiAppendCount;
+    },
+    getObservedRunRequests() {
+      return observedRunRequests.map((request) => ({ ...request }));
     },
     async close() {
       await Promise.all([
@@ -765,6 +877,69 @@ async function testEndStreamStopsHeartbeats(
   console.log("[test] Connect end-stream bridge shutdown OK");
 }
 
+async function testSessionHeadersPreserveConversationState(
+  modules: TestModules,
+  backend: TestCursorBackend,
+) {
+  console.log("[test] Testing session header conversation reuse...");
+
+  try {
+    backend.resetObservations();
+    backend.setRunSSEMode("checkpoint-then-close");
+    modules.stopProxy();
+    const proxyPort = await modules.startProxy(async () => "test-token");
+    const headers = {
+      "Content-Type": "application/json",
+      "x-opencode-session-id": "ses-test-shared",
+    };
+
+    const firstResponse = await fetch(`http://localhost:${proxyPort}/v1/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: "composer-2",
+        messages: [{ role: "user", content: "first prompt" }],
+      }),
+    });
+    assertEqual(firstResponse.status, 200, "Expected first session request to succeed");
+    await firstResponse.text();
+
+    const secondResponse = await fetch(`http://localhost:${proxyPort}/v1/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: "composer-2",
+        messages: [{ role: "user", content: "follow up only" }],
+      }),
+    });
+    assertEqual(secondResponse.status, 200, "Expected follow-up session request to succeed");
+    await secondResponse.text();
+
+    const observed = backend.getObservedRunRequests();
+    assertEqual(observed.length, 2, "Expected two observed Cursor run requests");
+    assertEqual(
+      observed[1]?.conversationId,
+      observed[0]?.conversationId,
+      "Expected follow-up request to reuse the same Cursor conversation id",
+    );
+    assertEqual(
+      observed[1]?.turnCount,
+      1,
+      "Expected follow-up request to reuse checkpointed conversation turns",
+    );
+    assertEqual(
+      observed[1]?.latestUserText,
+      "follow up only",
+      "Expected latest user message to remain the new prompt",
+    );
+  } finally {
+    modules.stopProxy();
+    backend.setRunSSEMode("close-on-append");
+  }
+
+  console.log("[test] Session header conversation reuse OK");
+}
+
 async function main() {
   const backend = await createTestCursorBackend();
   process.env.CURSOR_API_URL = backend.apiUrl;
@@ -780,6 +955,7 @@ async function main() {
     await testPluginLogging(modules);
     await testHttp2UnaryRpc(modules);
     await testArrayContentParsing(modules);
+    await testSessionHeadersPreserveConversationState(modules, backend);
     await testEndStreamStopsHeartbeats(modules, backend);
     await testExpiredTokenRefreshBeforeDiscovery(modules, backend);
     await testDiscoveryFailureAndSuccess(modules, backend);

@@ -118,6 +118,10 @@ interface ChatCompletionRequest {
   tool_choice?: unknown;
 }
 
+interface ChatRequestContext {
+  sessionId?: string;
+}
+
 
 interface CursorRequestPayload {
   requestBytes: Uint8Array;
@@ -703,7 +707,10 @@ export async function startProxy(
             throw new Error("Cursor proxy access token provider not configured");
           }
           const accessToken = await proxyAccessTokenProvider();
-          return handleChatCompletion(body, accessToken);
+          const sessionId = req.headers.get("x-opencode-session-id")
+            ?? req.headers.get("x-session-id")
+            ?? undefined;
+          return handleChatCompletion(body, accessToken, { sessionId });
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           logPluginError("Cursor proxy request failed", {
@@ -749,6 +756,7 @@ export function stopProxy(): void {
 function handleChatCompletion(
   body: ChatCompletionRequest,
   accessToken: string,
+  context: ChatRequestContext = {},
 ): Response | Promise<Response> {
   const { systemPrompt, userText, turns, toolResults } = parseMessages(body.messages);
   const modelId = body.model;
@@ -768,8 +776,8 @@ function handleChatCompletion(
 
   // bridgeKey: model-specific, for active tool-call bridges
   // convKey: model-independent, for conversation state that survives model switches
-  const bridgeKey = deriveBridgeKey(modelId, body.messages);
-  const convKey = deriveConversationKey(body.messages);
+  const bridgeKey = deriveBridgeKey(modelId, body.messages, context.sessionId);
+  const convKey = deriveConversationKey(body.messages, context.sessionId);
   const activeBridge = activeBridges.get(bridgeKey);
 
   if (activeBridge && toolResults.length > 0) {
@@ -1445,7 +1453,15 @@ function sendExecResult(
 function deriveBridgeKey(
   modelId: string,
   messages: OpenAIMessage[],
+  sessionId?: string,
 ): string {
+  if (sessionId) {
+    return createHash("sha256")
+      .update(`bridge:${sessionId}:${modelId}`)
+      .digest("hex")
+      .slice(0, 16);
+  }
+
   const firstUserMsg = messages.find((m) => m.role === "user");
   const firstUserText = firstUserMsg ? textContent(firstUserMsg.content) : "";
   return createHash("sha256")
@@ -1455,7 +1471,14 @@ function deriveBridgeKey(
 }
 
 /** Derive a key for conversation state. Model-independent so context survives model switches. */
-function deriveConversationKey(messages: OpenAIMessage[]): string {
+function deriveConversationKey(messages: OpenAIMessage[], sessionId?: string): string {
+  if (sessionId) {
+    return createHash("sha256")
+      .update(`session:${sessionId}`)
+      .digest("hex")
+      .slice(0, 16);
+  }
+
   return createHash("sha256")
     .update(buildConversationFingerprint(messages))
     .digest("hex")

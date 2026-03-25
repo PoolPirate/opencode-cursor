@@ -174,6 +174,13 @@ export const CursorAuthPlugin: Plugin = async (
         },
       ],
     },
+
+    async "chat.headers"(incoming, output) {
+      if (incoming.model.providerID !== CURSOR_PROVIDER_ID) return;
+
+      output.headers["x-opencode-session-id"] = incoming.sessionID;
+      output.headers["x-session-id"] = incoming.sessionID;
+    },
   };
 };
 
