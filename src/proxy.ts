@@ -419,20 +419,20 @@ async function createCursorSession(
           });
           try {
             abortController.abort();
-          } catch {}
+          } catch { }
           try {
             reader.cancel();
-          } catch {}
+          } catch { }
           finish(1);
         });
     },
     end() {
       try {
         abortController.abort();
-      } catch {}
+      } catch { }
       try {
         reader.cancel();
-      } catch {}
+      } catch { }
       finish(0);
     },
     onData(cb) {
@@ -462,18 +462,18 @@ interface CursorUnaryRpcOptions {
 
 export async function callCursorUnaryRpc(
   options: CursorUnaryRpcOptions,
- ): Promise<{ body: Uint8Array; exitCode: number; timedOut: boolean }> {
-   const target = new URL(options.rpcPath, options.url ?? CURSOR_API_URL);
-   const transport = options.transport ?? "auto";
+): Promise<{ body: Uint8Array; exitCode: number; timedOut: boolean }> {
+  const target = new URL(options.rpcPath, options.url ?? CURSOR_API_URL);
+  const transport = options.transport ?? "auto";
 
-   if (transport === "http2" || (transport === "auto" && target.protocol === "https:")) {
-     const http2Result = await callCursorUnaryRpcOverHttp2(options, target);
-     if (transport === "http2" || http2Result.timedOut || http2Result.exitCode !== 1) {
-       return http2Result;
-     }
-   }
+  if (transport === "http2" || (transport === "auto" && target.protocol === "https:")) {
+    const http2Result = await callCursorUnaryRpcOverHttp2(options, target);
+    if (transport === "http2" || http2Result.timedOut || http2Result.exitCode !== 1) {
+      return http2Result;
+    }
+  }
 
-   return callCursorUnaryRpcOverFetch(options, target);
+  return callCursorUnaryRpcOverFetch(options, target);
 }
 
 async function callCursorUnaryRpcOverFetch(
@@ -485,9 +485,9 @@ async function callCursorUnaryRpcOverFetch(
   const controller = new AbortController();
   const timeout = timeoutMs > 0
     ? setTimeout(() => {
-        timedOut = true;
-        controller.abort();
-      }, timeoutMs)
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs)
     : undefined;
 
   try {
@@ -544,22 +544,22 @@ async function callCursorUnaryRpcOverHttp2(
       if (timeout) clearTimeout(timeout);
       try {
         stream?.close();
-      } catch {}
+      } catch { }
       try {
         session?.close();
-      } catch {}
+      } catch { }
       resolve(result);
     };
 
     const timeout = timeoutMs > 0
       ? setTimeout(() => {
-          timedOut = true;
-          finish({
-            body: new Uint8Array(),
-            exitCode: 124,
-            timedOut: true,
-          });
-        }, timeoutMs)
+        timedOut = true;
+        finish({
+          body: new Uint8Array(),
+          exitCode: 124,
+          timedOut: true,
+        });
+      }, timeoutMs)
       : undefined;
 
     try {
@@ -623,7 +623,13 @@ async function callCursorUnaryRpcOverHttp2(
           timedOut,
         });
       });
-      stream.end(Buffer.from(options.requestBody));
+      // Bun's node:http2 client currently breaks on end(Buffer.alloc(0)) against
+      // Cursor's HTTPS endpoint, but a header-only end() succeeds for empty unary bodies.
+      if (options.requestBody.length > 0) {
+        stream.end(Buffer.from(options.requestBody));
+      } else {
+        stream.end();
+      }
     } catch (error) {
       logPluginError("Cursor unary HTTP/2 setup failed", {
         rpcPath: options.rpcPath,
@@ -913,7 +919,7 @@ function decodeMcpArgValue(value: Uint8Array): unknown {
   try {
     const parsed = fromBinary(ValueSchema, value);
     return toJson(ValueSchema, parsed);
-  } catch {}
+  } catch { }
   return new TextDecoder().decode(value);
 }
 
@@ -1683,27 +1689,27 @@ function handleToolResultResume(
     );
     const mcpResult = result
       ? create(McpResultSchema, {
-          result: {
-            case: "success",
-            value: create(McpSuccessSchema, {
-              content: [
-                create(McpToolResultContentItemSchema, {
-                  content: {
-                    case: "text",
-                    value: create(McpTextContentSchema, { text: result.content }),
-                  },
-                }),
-              ],
-              isError: false,
-            }),
-          },
-        })
+        result: {
+          case: "success",
+          value: create(McpSuccessSchema, {
+            content: [
+              create(McpToolResultContentItemSchema, {
+                content: {
+                  case: "text",
+                  value: create(McpTextContentSchema, { text: result.content }),
+                },
+              }),
+            ],
+            isError: false,
+          }),
+        },
+      })
       : create(McpResultSchema, {
-          result: {
-            case: "error",
-            value: create(McpErrorSchema, { error: "Tool result not provided" }),
-          },
-        });
+        result: {
+          case: "error",
+          value: create(McpErrorSchema, { error: "Tool result not provided" }),
+        },
+      });
 
     const execClientMessage = create(ExecClientMessageSchema, {
       id: exec.execMsgId,
@@ -1798,7 +1804,7 @@ async function collectFullResponse(
             const { content } = tagFilter.process(text);
             fullText += content;
           },
-          () => {},
+          () => { },
           (checkpointBytes) => {
             const stored = conversationStates.get(convKey);
             if (stored) {
@@ -1811,7 +1817,7 @@ async function collectFullResponse(
         // Skip
       }
     },
-    () => {},
+    () => { },
   ));
 
   bridge.onClose(() => {
