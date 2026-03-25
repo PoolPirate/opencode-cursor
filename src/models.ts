@@ -117,10 +117,13 @@ export function clearModelCache(): void {
 
 function buildDiscoveryHttpError(exitCode: number, body: Uint8Array): string {
   const detail = extractDiscoveryErrorDetail(body);
+  const protocolHint = exitCode === 464
+    ? " Likely protocol mismatch: Cursor appears to expect an HTTP/2 Connect unary request."
+    : "";
   if (!detail) {
-    return `Cursor model discovery failed with HTTP ${exitCode}.`;
+    return `Cursor model discovery failed with HTTP ${exitCode}.${protocolHint}`;
   }
-  return `Cursor model discovery failed with HTTP ${exitCode}: ${detail}`;
+  return `Cursor model discovery failed with HTTP ${exitCode}: ${detail}.${protocolHint}`;
 }
 
 function extractDiscoveryErrorDetail(body: Uint8Array): string | null {

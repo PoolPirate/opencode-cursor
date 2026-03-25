@@ -1,6 +1,7 @@
 import http from "node:http";
+import http2 from "node:http2";
 import type { AddressInfo } from "node:net";
-import { create, toBinary } from "@bufbuild/protobuf";
+import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import {
   GetUsableModelsResponseSchema,
   ModelDetailsSchema,
@@ -12,6 +13,7 @@ interface TestModules {
   startProxy: typeof import("../src/proxy").startProxy;
   stopProxy: typeof import("../src/proxy").stopProxy;
   getProxyPort: typeof import("../src/proxy").getProxyPort;
+  callCursorUnaryRpc: typeof import("../src/proxy").callCursorUnaryRpc;
   generateCursorAuthParams: typeof import("../src/auth").generateCursorAuthParams;
   getTokenExpiry: typeof import("../src/auth").getTokenExpiry;
   CursorAuthPlugin: typeof import("../src/index").CursorAuthPlugin;
@@ -226,12 +228,105 @@ async function loadModules(): Promise<TestModules> {
     startProxy: proxy.startProxy,
     stopProxy: proxy.stopProxy,
     getProxyPort: proxy.getProxyPort,
+    callCursorUnaryRpc: proxy.callCursorUnaryRpc,
     generateCursorAuthParams: auth.generateCursorAuthParams,
     getTokenExpiry: auth.getTokenExpiry,
     CursorAuthPlugin: index.CursorAuthPlugin,
     getCursorModels: models.getCursorModels,
     clearModelCache: models.clearModelCache,
   };
+}
+
+async function testHttp2UnaryRpc(modules: TestModules) {
+  console.log("[test] Testing HTTP/2 unary discovery transport...");
+
+  let observedHeaders: http2.IncomingHttpHeaders | undefined;
+  let observedBody = new Uint8Array();
+  const responseBody = toBinary(
+    GetUsableModelsResponseSchema,
+    create(GetUsableModelsResponseSchema, {
+      models: [
+        create(ModelDetailsSchema, {
+          modelId: "composer-2",
+          displayModelId: "composer-2",
+          displayName: "Composer 2",
+          displayNameShort: "Composer 2",
+          aliases: [],
+        }),
+      ],
+    }),
+  );
+
+  const server = http2.createServer();
+  server.on("stream", (stream: http2.ServerHttp2Stream, headers) => {
+    observedHeaders = headers;
+    const chunks: Buffer[] = [];
+    stream.on("data", (chunk) => {
+      chunks.push(Buffer.from(chunk));
+    });
+    stream.on("end", () => {
+      observedBody = new Uint8Array(Buffer.concat(chunks));
+      stream.respond({
+        ":status": 200,
+        "content-type": "application/proto",
+      });
+      stream.end(Buffer.from(responseBody));
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+
+  try {
+    const result = await modules.callCursorUnaryRpc({
+      accessToken: "test-access-token",
+      rpcPath: "/agent.v1.AgentService/GetUsableModels",
+      requestBody: new Uint8Array([1, 2, 3]),
+      timeoutMs: 5_000,
+      transport: "http2",
+      url: `http://127.0.0.1:${port}`,
+    });
+
+    assertEqual(result.exitCode, 0, "Expected HTTP/2 unary call to succeed");
+    assert(!result.timedOut, "Expected HTTP/2 unary call not to time out");
+    assertEqual(
+      observedHeaders?.["connect-protocol-version"],
+      "1",
+      "Expected Connect protocol version header",
+    );
+    assertEqual(
+      observedHeaders?.["content-type"],
+      "application/proto",
+      "Expected unary Connect content type",
+    );
+    assertEqual(
+      observedHeaders?.authorization,
+      "Bearer test-access-token",
+      "Expected bearer token auth header",
+    );
+    assertEqual(
+      observedHeaders?.["x-cursor-client-type"],
+      "cli",
+      "Expected Cursor client type header",
+    );
+    assertArrayEqual(
+      [...observedBody].map(String),
+      ["1", "2", "3"],
+      "Expected raw unary protobuf body to be forwarded",
+    );
+
+    const decoded = fromBinary(GetUsableModelsResponseSchema, result.body);
+    assertArrayEqual(
+      decoded.models.map((model) => model.modelId),
+      ["composer-2"],
+      "Expected HTTP/2 unary response body to round-trip",
+    );
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+
+  console.log("[test] HTTP/2 unary discovery transport OK");
 }
 
 async function testProxyStartStop(modules: TestModules) {
@@ -563,6 +658,7 @@ async function main() {
     await testAuthParams(modules);
     await testTokenExpiry(modules);
     await testPluginShape(modules);
+    await testHttp2UnaryRpc(modules);
     await testArrayContentParsing(modules);
     await testExpiredTokenRefreshBeforeDiscovery(modules, backend);
     await testDiscoveryFailureAndSuccess(modules, backend);

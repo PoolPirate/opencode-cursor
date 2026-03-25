@@ -67,9 +67,11 @@ import {
   type McpToolDefinition,
 } from "./proto/agent_pb";
 import { createHash } from "node:crypto";
+import { connect as connectHttp2, type ClientHttp2Session, type ClientHttp2Stream, type IncomingHttpHeaders, type OutgoingHttpHeaders } from "node:http2";
 
 const CURSOR_API_URL = process.env.CURSOR_API_URL ?? "https://api2.cursor.sh";
 const CURSOR_CLIENT_VERSION = "cli-2026.01.09-231024f";
+const CURSOR_CONNECT_PROTOCOL_VERSION = "1";
 const CONNECT_END_STREAM_FLAG = 0b00000010;
 const SSE_HEADERS = {
   "Content-Type": "text/event-stream",
@@ -184,20 +186,25 @@ function buildCursorHeaders(
   contentType: string,
   extra: Record<string, string> = {},
 ): Headers {
-  const headers = new Headers({
+  const headers = new Headers(buildCursorHeaderValues(options, contentType, extra));
+
+  return headers;
+}
+
+function buildCursorHeaderValues(
+  options: CursorBaseRequestOptions,
+  contentType: string,
+  extra: Record<string, string> = {},
+): Record<string, string> {
+  return {
     authorization: `Bearer ${options.accessToken}`,
     "content-type": contentType,
     "x-ghost-mode": "true",
     "x-cursor-client-version": CURSOR_CLIENT_VERSION,
     "x-cursor-client-type": "cli",
     "x-request-id": crypto.randomUUID(),
-  });
-
-  for (const [key, value] of Object.entries(extra)) {
-    headers.set(key, value);
-  }
-
-  return headers;
+    ...extra,
+  };
 }
 
 function encodeVarint(value: number): Uint8Array {
@@ -430,11 +437,29 @@ interface CursorUnaryRpcOptions {
   requestBody: Uint8Array;
   url?: string;
   timeoutMs?: number;
+  transport?: "auto" | "fetch" | "http2";
 }
 
 export async function callCursorUnaryRpc(
   options: CursorUnaryRpcOptions,
  ): Promise<{ body: Uint8Array; exitCode: number; timedOut: boolean }> {
+   const target = new URL(options.rpcPath, options.url ?? CURSOR_API_URL);
+   const transport = options.transport ?? "auto";
+
+   if (transport === "http2" || (transport === "auto" && target.protocol === "https:")) {
+     const http2Result = await callCursorUnaryRpcOverHttp2(options, target);
+     if (transport === "http2" || http2Result.timedOut || http2Result.exitCode !== 1) {
+       return http2Result;
+     }
+   }
+
+   return callCursorUnaryRpcOverFetch(options, target);
+}
+
+async function callCursorUnaryRpcOverFetch(
+  options: CursorUnaryRpcOptions,
+  target: URL,
+): Promise<{ body: Uint8Array; exitCode: number; timedOut: boolean }> {
   let timedOut = false;
   const timeoutMs = options.timeoutMs ?? 5_000;
   const controller = new AbortController();
@@ -446,15 +471,16 @@ export async function callCursorUnaryRpc(
     : undefined;
 
   try {
-    const response = await fetch(
-      new URL(options.rpcPath, options.url ?? CURSOR_API_URL),
-      {
-        method: "POST",
-        headers: buildCursorHeaders(options, "application/proto"),
-        body: toFetchBody(options.requestBody),
-        signal: controller.signal,
-      },
-    );
+    const response = await fetch(target, {
+      method: "POST",
+      headers: buildCursorHeaders(options, "application/proto", {
+        accept: "application/proto, application/json",
+        "connect-protocol-version": CURSOR_CONNECT_PROTOCOL_VERSION,
+        "connect-timeout-ms": String(timeoutMs),
+      }),
+      body: toFetchBody(options.requestBody),
+      signal: controller.signal,
+    });
 
     const body = new Uint8Array(await response.arrayBuffer());
     return {
@@ -471,6 +497,103 @@ export async function callCursorUnaryRpc(
   } finally {
     if (timeout) clearTimeout(timeout);
   }
+}
+
+async function callCursorUnaryRpcOverHttp2(
+  options: CursorUnaryRpcOptions,
+  target: URL,
+): Promise<{ body: Uint8Array; exitCode: number; timedOut: boolean }> {
+  const timeoutMs = options.timeoutMs ?? 5_000;
+  const authority = `${target.protocol}//${target.host}`;
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let timedOut = false;
+    let session: ClientHttp2Session | undefined;
+    let stream: ClientHttp2Stream | undefined;
+
+    const finish = (result: { body: Uint8Array; exitCode: number; timedOut: boolean }) => {
+      if (settled) return;
+      settled = true;
+      if (timeout) clearTimeout(timeout);
+      try {
+        stream?.close();
+      } catch {}
+      try {
+        session?.close();
+      } catch {}
+      resolve(result);
+    };
+
+    const timeout = timeoutMs > 0
+      ? setTimeout(() => {
+          timedOut = true;
+          finish({
+            body: new Uint8Array(),
+            exitCode: 124,
+            timedOut: true,
+          });
+        }, timeoutMs)
+      : undefined;
+
+    try {
+      session = connectHttp2(authority);
+      session.once("error", () => {
+        finish({
+          body: new Uint8Array(),
+          exitCode: timedOut ? 124 : 1,
+          timedOut,
+        });
+      });
+
+      const headers: OutgoingHttpHeaders = {
+        ":method": "POST",
+        ":path": `${target.pathname}${target.search}`,
+        ...buildCursorHeaderValues(options, "application/proto", {
+          accept: "application/proto, application/json",
+          "connect-protocol-version": CURSOR_CONNECT_PROTOCOL_VERSION,
+          "connect-timeout-ms": String(timeoutMs),
+        }),
+      };
+
+      stream = session.request(headers);
+
+      let statusCode = 0;
+      const chunks: Buffer[] = [];
+
+      stream.once("response", (responseHeaders: IncomingHttpHeaders) => {
+        const statusHeader = responseHeaders[":status"];
+        statusCode = typeof statusHeader === "number"
+          ? statusHeader
+          : Number(statusHeader ?? 0);
+      });
+      stream.on("data", (chunk: Buffer | Uint8Array) => {
+        chunks.push(Buffer.from(chunk));
+      });
+      stream.once("end", () => {
+        const body = new Uint8Array(Buffer.concat(chunks));
+        finish({
+          body,
+          exitCode: statusCode >= 200 && statusCode < 300 ? 0 : (statusCode || 1),
+          timedOut,
+        });
+      });
+      stream.once("error", () => {
+        finish({
+          body: new Uint8Array(),
+          exitCode: timedOut ? 124 : 1,
+          timedOut,
+        });
+      });
+      stream.end(Buffer.from(options.requestBody));
+    } catch {
+      finish({
+        body: new Uint8Array(),
+        exitCode: timedOut ? 124 : 1,
+        timedOut,
+      });
+    }
+  });
 }
 
 let proxyServer: ReturnType<typeof Bun.serve> | undefined;
