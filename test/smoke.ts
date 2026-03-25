@@ -507,68 +507,8 @@ async function testPluginShape(modules: TestModules) {
   if (typeof hooks.auth.methods[0].authorize !== "function") {
     throw new Error("Plugin auth method missing authorize function");
   }
-  if (typeof hooks["chat.headers"] !== "function") {
-    throw new Error("Plugin hooks missing 'chat.headers'");
-  }
 
   console.log("[test] Plugin shape OK");
-}
-
-async function testCursorSessionHeaders(modules: TestModules) {
-  console.log("[test] Checking Cursor session header injection...");
-
-  const hooks = await modules.CursorAuthPlugin({
-    client: { auth: { set: async () => {} } },
-  } as any);
-
-  const chatHeaders = hooks["chat.headers"];
-  assert(chatHeaders, "Expected chat.headers hook to be defined");
-
-  const cursorHeaders = {} as Record<string, string>;
-  await chatHeaders({
-    sessionID: "ses_test_123",
-    agent: "title",
-    model: { providerID: "cursor" },
-    provider: { info: { id: "cursor" } },
-    message: { id: "msg_test_456" },
-  } as any, {
-    headers: cursorHeaders,
-  });
-
-  assertEqual(
-    cursorHeaders["x-opencode-session-id"],
-    "ses_test_123",
-    "Expected Cursor session header to be forwarded",
-  );
-  assertEqual(
-    cursorHeaders["x-opencode-agent"],
-    "title",
-    "Expected Cursor agent header to be forwarded",
-  );
-  assertEqual(
-    cursorHeaders["x-opencode-message-id"],
-    "msg_test_456",
-    "Expected Cursor message header to be forwarded",
-  );
-
-  const otherHeaders = {} as Record<string, string>;
-  await chatHeaders({
-    sessionID: "ses_other",
-    agent: "build",
-    model: { providerID: "openai" },
-    provider: { info: { id: "openai" } },
-    message: { id: "msg_other" },
-  } as any, {
-    headers: otherHeaders,
-  });
-
-  assertEqual(
-    Object.keys(otherHeaders).length,
-    0,
-    "Expected non-Cursor models to be left unchanged",
-  );
-
-  console.log("[test] Cursor session header injection OK");
 }
 
 async function testArrayContentParsing(modules: TestModules) {
@@ -766,7 +706,6 @@ async function main() {
     await testAuthParams(modules);
     await testTokenExpiry(modules);
     await testPluginShape(modules);
-    await testCursorSessionHeaders(modules);
     await testPluginLogging(modules);
     await testHttp2UnaryRpc(modules);
     await testArrayContentParsing(modules);

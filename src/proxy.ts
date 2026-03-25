@@ -74,15 +74,11 @@ const CURSOR_API_URL = process.env.CURSOR_API_URL ?? "https://api2.cursor.sh";
 const CURSOR_CLIENT_VERSION = "cli-2026.01.09-231024f";
 const CURSOR_CONNECT_PROTOCOL_VERSION = "1";
 const CONNECT_END_STREAM_FLAG = 0b00000010;
-export const OPENCODE_SESSION_ID_HEADER = "x-opencode-session-id";
-export const OPENCODE_AGENT_HEADER = "x-opencode-agent";
-export const OPENCODE_MESSAGE_ID_HEADER = "x-opencode-message-id";
 const SSE_HEADERS = {
   "Content-Type": "text/event-stream",
   "Cache-Control": "no-cache",
   Connection: "keep-alive",
 } as const;
-const EPHEMERAL_CURSOR_AGENTS = new Set(["title", "summary"]);
 
 interface OpenAIToolCall {
   id: string;
@@ -120,12 +116,6 @@ interface ChatCompletionRequest {
   max_tokens?: number;
   tools?: OpenAIToolDef[];
   tool_choice?: unknown;
-}
-
-interface RequestScope {
-  sessionID?: string;
-  agent?: string;
-  messageID?: string;
 }
 
 
@@ -713,11 +703,7 @@ export async function startProxy(
             throw new Error("Cursor proxy access token provider not configured");
           }
           const accessToken = await proxyAccessTokenProvider();
-          return handleChatCompletion(body, accessToken, {
-            sessionID: req.headers.get(OPENCODE_SESSION_ID_HEADER) ?? undefined,
-            agent: req.headers.get(OPENCODE_AGENT_HEADER) ?? undefined,
-            messageID: req.headers.get(OPENCODE_MESSAGE_ID_HEADER) ?? undefined,
-          });
+          return handleChatCompletion(body, accessToken);
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           logPluginError("Cursor proxy request failed", {
@@ -763,7 +749,6 @@ export function stopProxy(): void {
 function handleChatCompletion(
   body: ChatCompletionRequest,
   accessToken: string,
-  requestScope: RequestScope = {},
 ): Response | Promise<Response> {
   const { systemPrompt, userText, turns, toolResults } = parseMessages(body.messages);
   const modelId = body.model;
@@ -783,8 +768,8 @@ function handleChatCompletion(
 
   // bridgeKey: model-specific, for active tool-call bridges
   // convKey: model-independent, for conversation state that survives model switches
-  const bridgeKey = deriveBridgeKey(modelId, body.messages, requestScope);
-  const convKey = deriveConversationKey(body.messages, requestScope);
+  const bridgeKey = deriveBridgeKey(modelId, body.messages);
+  const convKey = deriveConversationKey(body.messages);
   const activeBridge = activeBridges.get(bridgeKey);
 
   if (activeBridge && toolResults.length > 0) {
@@ -1454,47 +1439,28 @@ function sendExecResult(
 function deriveBridgeKey(
   modelId: string,
   messages: OpenAIMessage[],
-  requestScope: RequestScope,
 ): string {
   const firstUserMsg = messages.find((m) => m.role === "user");
   const firstUserText = firstUserMsg ? textContent(firstUserMsg.content) : "";
   return createHash("sha256")
-    .update(
-      `bridge:${requestScope.sessionID ?? ""}:${requestScope.agent ?? ""}:${modelId}:${firstUserText.slice(0, 200)}`,
-    )
+    .update(`bridge:${modelId}:${firstUserText.slice(0, 200)}`)
     .digest("hex")
     .slice(0, 16);
 }
 
 /** Derive a key for conversation state. Model-independent so context survives model switches. */
-function deriveConversationKey(
-  messages: OpenAIMessage[],
-  requestScope: RequestScope,
-): string {
-  if (requestScope.sessionID) {
-    const scope = shouldIsolateConversation(requestScope)
-      ? `${requestScope.sessionID}:${requestScope.agent ?? ""}:${requestScope.messageID ?? crypto.randomUUID()}`
-      : `${requestScope.sessionID}:${requestScope.agent ?? "default"}`;
-    return createHash("sha256")
-      .update(`conv:${scope}`)
-      .digest("hex")
-      .slice(0, 16);
-  }
-
-  const firstUserMsg = messages.find((m) => m.role === "user");
-  const firstUserText = firstUserMsg ? textContent(firstUserMsg.content) : "";
+function deriveConversationKey(messages: OpenAIMessage[]): string {
   return createHash("sha256")
-    .update(`conv:${firstUserText.slice(0, 200)}`)
+    .update(buildConversationFingerprint(messages))
     .digest("hex")
     .slice(0, 16);
 }
 
-function shouldIsolateConversation(requestScope: RequestScope): boolean {
-  return Boolean(
-    requestScope.agent
-      && EPHEMERAL_CURSOR_AGENTS.has(requestScope.agent)
-      && requestScope.messageID,
-  );
+function buildConversationFingerprint(messages: OpenAIMessage[]): string {
+  return messages.map((message) => {
+    const toolCallIDs = (message.tool_calls ?? []).map((call) => call.id).join(",");
+    return `${message.role}:${textContent(message.content)}:${message.tool_call_id ?? ""}:${toolCallIDs}`;
+  }).join("\n---\n");
 }
 
 /** Create an SSE streaming Response that reads from a live bridge. */

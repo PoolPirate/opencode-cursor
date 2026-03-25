@@ -15,9 +15,6 @@ import {
 import { configurePluginLogger, errorDetails, logPluginError, logPluginWarn } from "./logger";
 import { getCursorModels, type CursorModel } from "./models";
 import {
-  OPENCODE_AGENT_HEADER,
-  OPENCODE_MESSAGE_ID_HEADER,
-  OPENCODE_SESSION_ID_HEADER,
   startProxy,
   stopProxy,
 } from "./proxy";
@@ -176,14 +173,6 @@ export const CursorAuthPlugin: Plugin = async (
           },
         },
       ],
-    },
-
-    async "chat.headers"(input, output) {
-      if (input.model.providerID !== CURSOR_PROVIDER_ID) return;
-
-      output.headers[OPENCODE_SESSION_ID_HEADER] = input.sessionID;
-      output.headers[OPENCODE_AGENT_HEADER] = input.agent;
-      output.headers[OPENCODE_MESSAGE_ID_HEADER] = input.message.id;
     },
   };
 };
