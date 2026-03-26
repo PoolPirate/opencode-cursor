@@ -16,6 +16,9 @@ export interface PendingExec {
   toolName: string;
   /** Decoded arguments JSON string for SSE tool_calls emission. */
   decodedArgs: string;
+  source?: "interaction" | "exec";
+  cursorCallId?: string;
+  modelCallId?: string;
 }
 
 /** A live Cursor session kept alive across requests for tool result continuation. */

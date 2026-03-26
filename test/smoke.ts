@@ -195,16 +195,20 @@ function decodeObservedRunRequest(
   };
 }
 
-function makeToolCallFrame(): Buffer {
+function makeToolCallFrame(
+  toolCallId = "call-1",
+  execId = "exec-1",
+  execMsgId = 1,
+): Buffer {
   const execMessage = create(ExecServerMessageSchema, {
-    id: 1,
-    execId: "exec-1",
+    id: execMsgId,
+    execId,
     message: {
       case: "mcpArgs",
       value: create(McpArgsSchema, {
         name: "read_file",
         toolName: "read_file",
-        toolCallId: "call-1",
+        toolCallId,
         providerIdentifier: "opencode",
         args: {
           path: toBinary(ValueSchema, fromJson(ValueSchema, "src/index.ts")),
@@ -506,7 +510,13 @@ async function createTestCursorBackend(): Promise<TestCursorBackend> {
         clearDelayedExecTimer();
         delayedExecTimer = setTimeout(() => {
           delayedExecTimer = undefined;
-          writeRunFrame(makeToolCallFrame());
+          writeRunFrame(
+            makeToolCallFrame(
+              "interaction-call-1",
+              "exec-interaction-call-1",
+              11,
+            ),
+          );
         }, 100);
       } else {
         toolCallIssued = false;
@@ -1616,7 +1626,7 @@ async function testInteractionThenDelayedExecToolCallResumesCorrectly(
               content: null,
               tool_calls: [
                 {
-                  id: "call-1",
+                  id: "interaction-call-1",
                   type: "function",
                   function: {
                     name: "read_file",
@@ -1627,7 +1637,7 @@ async function testInteractionThenDelayedExecToolCallResumesCorrectly(
             },
             {
               role: "tool",
-              tool_call_id: "call-1",
+              tool_call_id: "interaction-call-1",
               content: "file contents",
             },
           ],

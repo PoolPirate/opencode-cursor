@@ -45,6 +45,13 @@ export function logPluginWarn(
   logPlugin("warn", message, extra);
 }
 
+export function logPluginInfo(
+  message: string,
+  extra: Record<string, unknown> = {},
+): void {
+  logPlugin("info", message, extra);
+}
+
 export function logPluginError(
   message: string,
   extra: Record<string, unknown> = {},

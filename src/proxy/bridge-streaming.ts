@@ -11,7 +11,12 @@ import {
   type McpToolDefinition,
 } from "../proto/agent_pb";
 import type { CursorSession } from "../cursor/bidi-session";
-import { errorDetails, logPluginError, logPluginWarn } from "../logger";
+import {
+  errorDetails,
+  logPluginError,
+  logPluginInfo,
+  logPluginWarn,
+} from "../logger";
 import {
   formatToolCallSummary,
   formatToolResultSummary,
@@ -427,7 +432,23 @@ export async function handleToolResultResume(
       .join("\n\n"),
   };
 
+  logPluginInfo("Preparing Cursor tool-result resume", {
+    bridgeKey,
+    convKey,
+    modelId,
+    toolResults,
+    pendingExecs,
+  });
+
   await waitForResolvablePendingExecs(active, toolResults);
+
+  logPluginInfo("Resolved pending exec state before Cursor tool-result resume", {
+    bridgeKey,
+    convKey,
+    modelId,
+    toolResults,
+    pendingExecs,
+  });
 
   for (const exec of pendingExecs) {
     const result = toolResults.find(
@@ -471,6 +492,20 @@ export async function handleToolResultResume(
     });
     const clientMessage = create(AgentClientMessageSchema, {
       message: { case: "execClientMessage", value: execClientMessage },
+    });
+
+    logPluginInfo("Sending Cursor tool-result resume message", {
+      bridgeKey,
+      convKey,
+      modelId,
+      toolCallId: exec.toolCallId,
+      toolName: exec.toolName,
+      source: exec.source,
+      execId: exec.execId,
+      execMsgId: exec.execMsgId,
+      cursorCallId: exec.cursorCallId,
+      modelCallId: exec.modelCallId,
+      matchedToolResult: result,
     });
 
     bridge.write(toBinary(AgentClientMessageSchema, clientMessage));

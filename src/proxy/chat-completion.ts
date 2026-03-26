@@ -1,4 +1,4 @@
-import { logPluginWarn } from "../logger";
+import { logPluginInfo, logPluginWarn } from "../logger";
 import {
   buildInitialHandoffPrompt,
   buildTitleSourceText,
@@ -104,6 +104,14 @@ export function handleChatCompletion(
   const activeBridge = activeBridges.get(bridgeKey);
 
   if (activeBridge && toolResults.length > 0) {
+    logPluginInfo("Matched OpenAI tool results to active Cursor bridge", {
+      bridgeKey,
+      convKey,
+      requestedModelId: modelId,
+      activeBridgeModelId: activeBridge.modelId,
+      toolResults,
+      pendingExecs: activeBridge.pendingExecs,
+    });
     activeBridges.delete(bridgeKey);
 
     if (activeBridge.bridge.alive) {
