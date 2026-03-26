@@ -1283,7 +1283,7 @@ async function testSystemPromptForwardedToCursorRunRequest(
   modules: TestModules,
   backend: TestCursorBackend,
 ) {
-  console.log("[test] Testing system prompt forwarding for title-like requests...");
+  console.log("[test] Testing title-agent prompt rewriting...");
 
   try {
     backend.resetObservations();
@@ -1319,14 +1319,24 @@ async function testSystemPromptForwardedToCursorRunRequest(
     assertEqual(observed.length, 1, "Expected one observed Cursor run request");
     assertEqual(
       observed[0]?.customSystemPrompt,
-      "Generate a short 3-6 word session title. Reply with only the title and no punctuation.",
-      "Expected system prompt to be forwarded through customSystemPrompt for Cursor",
+      "",
+      "Expected proxy to avoid Cursor's restricted customSystemPrompt field",
+    );
+    assert(
+      observed[0]?.latestUserText.startsWith(
+        "Generate a short 3-6 word session title. Reply with only the title and no punctuation.",
+      ),
+      `Expected latest user text to begin with OpenCode's original title prompt, got ${JSON.stringify(observed[0])}`,
+    );
+    assert(
+      observed[0]?.latestUserText.includes("What determines fish prices in Tokyo markets?"),
+      `Expected rewritten title prompt to include the original content, got ${JSON.stringify(observed[0])}`,
     );
   } finally {
     modules.stopProxy();
   }
 
-  console.log("[test] System prompt forwarding OK");
+  console.log("[test] Title-agent prompt rewriting OK");
 }
 
 async function testPendingToolResultResumeAcrossModelSwitch(

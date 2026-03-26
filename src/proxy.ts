@@ -804,7 +804,11 @@ function handleChatCompletion(
     completedTurnsFingerprint,
   } = parsed;
   const modelId = body.model;
-  const tools = selectToolsForChoice(body.tools ?? [], body.tool_choice);
+  const normalizedAgentKey = normalizeAgentKey(context.agentKey);
+  const isTitleAgent = normalizedAgentKey === "title";
+  const tools = isTitleAgent
+    ? []
+    : selectToolsForChoice(body.tools ?? [], body.tool_choice);
 
   if (!userText && toolResults.length === 0) {
     return new Response(
@@ -880,11 +884,14 @@ function handleChatCompletion(
   const mcpTools = buildMcpToolDefinitions(tools);
   const needsInitialHandoff = !stored.checkpoint && (turns.length > 0 || pendingAssistantSummary || toolResults.length > 0);
   const replayTurns = needsInitialHandoff ? [] : turns;
-  const effectiveUserText = needsInitialHandoff
+  let effectiveUserText = needsInitialHandoff
     ? buildInitialHandoffPrompt(userText, turns, pendingAssistantSummary, toolResults)
     : toolResults.length > 0
       ? buildToolResumePrompt(userText, pendingAssistantSummary, toolResults)
       : userText;
+  if (isTitleAgent) {
+    effectiveUserText = buildTitleUserPrompt(systemPrompt, effectiveUserText);
+  }
   const payload = buildCursorRequest(
     modelId, systemPrompt, effectiveUserText, replayTurns,
     stored.conversationId, stored.checkpoint, stored.blobStore,
@@ -898,6 +905,7 @@ function handleChatCompletion(
       completedTurnsFingerprint,
       turns,
       userText,
+      agentKey: normalizedAgentKey,
     });
   }
   return handleStreamingResponse(payload, accessToken, modelId, bridgeKey, convKey, {
@@ -906,6 +914,7 @@ function handleChatCompletion(
     completedTurnsFingerprint,
     turns,
     userText,
+    agentKey: normalizedAgentKey,
   });
 }
 
@@ -1159,6 +1168,10 @@ function buildInitialHandoffPrompt(
   ].filter(Boolean).join("\n");
 }
 
+function buildTitleUserPrompt(systemPrompt: string, content: string): string {
+  return [systemPrompt.trim(), content.trim()].filter(Boolean).join("\n\n");
+}
+
 function selectToolsForChoice(
   tools: OpenAIToolDef[],
   toolChoice: unknown,
@@ -1311,7 +1324,6 @@ function buildCursorRequest(
     action,
     modelDetails,
     conversationId,
-    customSystemPrompt: systemPrompt,
   });
 
   const clientMessage = create(AgentClientMessageSchema, {
@@ -1789,6 +1801,7 @@ interface ConversationRequestMetadata {
   turns: Array<{ userText: string; assistantText: string }>;
   userText: string;
   assistantSeedText?: string;
+  agentKey?: string;
 }
 
 function updateStoredConversationAfterCompletion(
