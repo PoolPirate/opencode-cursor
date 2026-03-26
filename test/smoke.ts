@@ -2387,8 +2387,6 @@ async function testHandledInteractionQueriesProduceClientResponses(
     totalTokens: 0,
     interactionToolArgsText: new Map(),
     emittedToolCallIds: new Set(),
-    deferredInteractionExecs: new Map(),
-    deferredInteractionExecTimers: new Map(),
   });
 
   const sentFrames: Uint8Array[] = [];
@@ -2602,9 +2600,8 @@ async function testExecMcpArgsPreferredOverInteractionToolCompletion(
     totalTokens: 0,
     interactionToolArgsText: new Map(),
     emittedToolCallIds: new Set(),
-    deferredInteractionExecs: new Map(),
-    deferredInteractionExecTimers: new Map(),
   };
+  const observedExecs: Array<{ execId: string; execMsgId: number }> = [];
 
   const processServerMessage = (message: any) => {
     modules.processServerMessage(
@@ -2614,7 +2611,7 @@ async function testExecMcpArgsPreferredOverInteractionToolCompletion(
       () => {},
       state as any,
       () => {},
-      () => {},
+      (exec) => observedExecs.push({ execId: exec.execId, execMsgId: exec.execMsgId }),
     );
   };
 
@@ -2681,12 +2678,26 @@ async function testExecMcpArgsPreferredOverInteractionToolCompletion(
     }),
   );
 
-  await new Promise((resolve) => setTimeout(resolve, 125));
+  assertEqual(
+    observedExecs.length,
+    1,
+    "Expected interaction-side MCP completion to emit the first tool call immediately",
+  );
+  assertEqual(
+    observedExecs[0]?.execMsgId,
+    0,
+    "Expected interaction-side MCP completion to emit provisional exec metadata before mcpArgs arrives",
+  );
 
   assertEqual(
     state.emittedToolCallIds.size,
     1,
     "Expected duplicate interaction and exec MCP tool events to surface only one tool call",
+  );
+  assertEqual(
+    observedExecs.length,
+    1,
+    "Expected later execServerMessage metadata upgrade to avoid emitting a second tool call",
   );
   assertEqual(
     (state.pendingExecs as Array<{ execId: string }>)[0]?.execId,
@@ -2705,6 +2716,115 @@ async function testExecMcpArgsPreferredOverInteractionToolCompletion(
   );
 
   console.log("[test] Exec MCP args preference over duplicate interaction completions OK");
+}
+
+async function testInteractionToolCompletionDoesNotDowngradeExecMetadata(
+  modules: TestModules,
+) {
+  console.log("[test] Testing interaction duplicate does not downgrade exec metadata...");
+
+  const state = {
+    toolCallIndex: 0,
+    pendingExecs: [],
+    outputTokens: 0,
+    totalTokens: 0,
+    interactionToolArgsText: new Map(),
+    emittedToolCallIds: new Set(),
+  };
+  const observedExecs: Array<{ execId: string; execMsgId: number }> = [];
+
+  const processServerMessage = (message: any) => {
+    modules.processServerMessage(
+      message,
+      new Map(),
+      [],
+      () => {},
+      state as any,
+      () => {},
+      (exec) => observedExecs.push({ execId: exec.execId, execMsgId: exec.execMsgId }),
+    );
+  };
+
+  processServerMessage(
+    create(AgentServerMessageSchema, {
+      message: {
+        case: "execServerMessage",
+        value: create(ExecServerMessageSchema, {
+          id: 42,
+          execId: "exec-dup",
+          message: {
+            case: "mcpArgs",
+            value: create(McpArgsSchema, {
+              name: "bash",
+              toolName: "bash",
+              toolCallId: "call-dup",
+              providerIdentifier: "opencode",
+              args: {
+                command: toBinary(
+                  ValueSchema,
+                  fromJson(ValueSchema, 'echo "opencode_bash_ok"'),
+                ),
+              },
+            }),
+          },
+        }),
+      },
+    }),
+  );
+
+  processServerMessage(
+    create(AgentServerMessageSchema, {
+      message: {
+        case: "interactionUpdate",
+        value: {
+          message: {
+            case: "toolCallCompleted",
+            value: {
+              callId: "call-dup",
+              modelCallId: "model-call-dup",
+              toolCall: {
+                tool: {
+                  case: "mcpToolCall",
+                  value: {
+                    args: {
+                      name: "bash",
+                      toolName: "bash",
+                      toolCallId: "call-dup",
+                      providerIdentifier: "opencode",
+                      args: {
+                        command: toBinary(
+                          ValueSchema,
+                          fromJson(ValueSchema, 'echo "opencode_bash_ok"'),
+                        ),
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        } as any,
+      },
+    }),
+  );
+
+  assertEqual(
+    observedExecs.length,
+    1,
+    "Expected execServerMessage-first MCP tool flow to emit only one tool call",
+  );
+  assertEqual(
+    (state.pendingExecs as Array<{ execId: string }>)[0]?.execId,
+    "exec-dup",
+    "Expected later interaction duplicate to preserve authoritative exec id",
+  );
+  assertEqual(
+    (state.pendingExecs as Array<{ execMsgId: number }>)[0]?.execMsgId,
+    42,
+    "Expected later interaction duplicate to preserve authoritative exec message id",
+  );
+
+  console.log("[test] Interaction duplicate does not downgrade exec metadata OK");
 }
 
 async function testUnsupportedSetupVmInteractionQueryFailsFast(
@@ -2797,6 +2917,7 @@ async function main() {
     await testUnsupportedExecFailsFast(modules, backend);
     await testHandledInteractionQueriesProduceClientResponses(modules);
     await testExecMcpArgsPreferredOverInteractionToolCompletion(modules);
+    await testInteractionToolCompletionDoesNotDowngradeExecMetadata(modules);
     await testUnsupportedSetupVmInteractionQueryFailsFast(modules, backend);
     await testEndStreamStopsHeartbeats(modules, backend);
     await testTurnEndedStopsStreamingResponse(modules, backend);

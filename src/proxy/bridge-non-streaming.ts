@@ -12,7 +12,6 @@ import {
 import type { StreamState } from "./stream-state";
 import type { CursorRequestPayload } from "./types";
 import {
-  clearDeferredInteractionExecs,
   computeUsage,
   createConnectFrameParser,
   createThinkingTagFilter,
@@ -97,8 +96,6 @@ async function collectFullResponse(
     totalTokens: 0,
     interactionToolArgsText: new Map(),
     emittedToolCallIds: new Set(),
-    deferredInteractionExecs: new Map(),
-    deferredInteractionExecTimers: new Map(),
   };
   const tagFilter = createThinkingTagFilter();
 
@@ -191,7 +188,6 @@ async function collectFullResponse(
 
   bridge.onClose(() => {
     clearInterval(heartbeatTimer);
-    clearDeferredInteractionExecs(state);
     syncStoredBlobStore(convKey, payload.blobStore);
 
     const flushed = tagFilter.flush();
