@@ -15,11 +15,13 @@ import {
   GetUsableModelsResponseSchema,
   McpArgsSchema,
   ModelDetailsSchema,
+  NameAgentRequestSchema,
+  NameAgentResponseSchema,
   UserMessageSchema,
 } from "../src/proto/agent_pb";
 
 type DiscoveryMode = "success" | "empty" | "auth-error";
-type RunSSEMode = "close-on-append" | "end-stream-hold" | "checkpoint-then-close" | "tool-call-pause";
+type RunSSEMode = "close-on-append" | "end-stream-hold" | "checkpoint-then-close" | "tool-call-pause" | "verbose-title-close";
 
 interface ObservedRunRequest {
   conversationId: string;
@@ -56,6 +58,7 @@ interface TestCursorBackend {
   getRefreshAuthHeaders: () => string[];
   getBidiAppendCount: () => number;
   getObservedRunRequests: () => ObservedRunRequest[];
+  getObservedNameAgentRequests: () => string[];
   close: () => Promise<void>;
 }
 
@@ -238,6 +241,21 @@ function makeCheckpointUpdateFrame(): Buffer {
   return frameConnectUnaryMessage(toBinary(AgentServerMessageSchema, serverMessage));
 }
 
+function makeTextDeltaFrame(text: string): Buffer {
+  const serverMessage = create(AgentServerMessageSchema, {
+    message: {
+      case: "interactionUpdate",
+      value: {
+        message: {
+          case: "textDelta",
+          value: { text },
+        },
+      } as any,
+    },
+  });
+  return frameConnectUnaryMessage(toBinary(AgentServerMessageSchema, serverMessage));
+}
+
 async function createTestCursorBackend(): Promise<TestCursorBackend> {
   let discoveryMode: DiscoveryMode = "success";
   let runSSEMode: RunSSEMode = "close-on-append";
@@ -248,6 +266,7 @@ async function createTestCursorBackend(): Promise<TestCursorBackend> {
   const discoveryRequestBodies: Uint8Array[] = [];
   const refreshAuthHeaders: string[] = [];
   const observedRunRequests: ObservedRunRequest[] = [];
+  const observedNameAgentRequests: string[] = [];
   let bidiAppendCount = 0;
 
   const refreshServer = http.createServer((req, res) => {
@@ -339,6 +358,22 @@ async function createTestCursorBackend(): Promise<TestCursorBackend> {
         return;
       }
 
+      if (path === "/agent.v1.AgentService/NameAgent") {
+        const request = fromBinary(NameAgentRequestSchema, new Uint8Array(Buffer.concat(chunks)));
+        observedNameAgentRequests.push(request.userMessage);
+        const responseBody = frameConnectUnaryMessage(
+          toBinary(
+            NameAgentResponseSchema,
+            create(NameAgentResponseSchema, {
+              name: "Fish Price Question",
+            }),
+          ),
+        );
+        res.writeHead(200, { "Content-Type": "application/connect+proto" });
+        res.end(responseBody);
+        return;
+      }
+
       if (path === "/aiserver.v1.BidiService/BidiAppend") {
         bidiAppendCount += 1;
         const observed = decodeObservedRunRequest(new Uint8Array(Buffer.concat(chunks)));
@@ -359,6 +394,10 @@ async function createTestCursorBackend(): Promise<TestCursorBackend> {
           }, 6_100);
         } else if (runSSEMode === "checkpoint-then-close" && pendingRunSSE) {
           pendingRunSSE.write(makeCheckpointUpdateFrame());
+          pendingRunSSE.end();
+          pendingRunSSE = null;
+        } else if (runSSEMode === "verbose-title-close" && pendingRunSSE) {
+          pendingRunSSE.write(makeTextDeltaFrame("# That depends on which fish you're looking for! If you're referring to the famous 1998 techno hit ..."));
           pendingRunSSE.end();
           pendingRunSSE = null;
         } else if (runSSEMode === "tool-call-pause" && pendingRunSSE) {
@@ -398,6 +437,7 @@ async function createTestCursorBackend(): Promise<TestCursorBackend> {
       discoveryRequestBodies.length = 0;
       refreshAuthHeaders.length = 0;
       observedRunRequests.length = 0;
+      observedNameAgentRequests.length = 0;
       bidiAppendCount = 0;
       toolCallIssued = false;
     },
@@ -418,6 +458,9 @@ async function createTestCursorBackend(): Promise<TestCursorBackend> {
         ...request,
         turns: request.turns.map((turn) => ({ ...turn })),
       }));
+    },
+    getObservedNameAgentRequests() {
+      return [...observedNameAgentRequests];
     },
     async close() {
       await Promise.all([
@@ -1058,23 +1101,20 @@ async function testAgentScopedSessionIsolation(
     }).then((response) => response.text());
 
     const observed = backend.getObservedRunRequests();
-    assertEqual(observed.length, 3, "Expected three observed run requests");
+    assertEqual(observed.length, 2, "Expected only build-agent requests to use Cursor RunSSE");
+    const titleRequests = backend.getObservedNameAgentRequests();
+    assertEqual(titleRequests.length, 1, "Expected title agent request to use Cursor NameAgent");
     assert(
-      observed[0]?.conversationId !== observed[1]?.conversationId,
-      "Expected title agent request to use a different Cursor conversation id",
+      titleRequests[0]?.includes("generate a short title"),
+      `Expected title agent naming request to include title source text, got ${JSON.stringify(titleRequests)}`,
     );
     assertEqual(
-      observed[1]?.turnCount,
-      0,
-      "Expected title agent request to start with a fresh conversation state",
-    );
-    assertEqual(
-      observed[2]?.conversationId,
       observed[0]?.conversationId,
+      observed[1]?.conversationId,
       "Expected build agent requests to keep sharing the same Cursor conversation id",
     );
     assertEqual(
-      observed[2]?.turnCount,
+      observed[1]?.turnCount,
       1,
       "Expected build agent follow-up to reuse its checkpointed conversation state",
     );
@@ -1149,7 +1189,7 @@ async function testProviderSwitchHistoryReconstruction(
 
   try {
     backend.resetObservations();
-    backend.setRunSSEMode("close-on-append");
+    backend.setRunSSEMode("verbose-title-close");
     modules.stopProxy();
     const proxyPort = await modules.startProxy(async () => "test-token");
 
@@ -1283,7 +1323,7 @@ async function testSystemPromptForwardedToCursorRunRequest(
   modules: TestModules,
   backend: TestCursorBackend,
 ) {
-  console.log("[test] Testing title-agent prompt rewriting...");
+  console.log("[test] Testing title-agent naming RPC...");
 
   try {
     backend.resetObservations();
@@ -1315,28 +1355,26 @@ async function testSystemPromptForwardedToCursorRunRequest(
     });
 
     assertEqual(response.status, 200, "Expected title-like request to succeed");
-    const observed = backend.getObservedRunRequests();
-    assertEqual(observed.length, 1, "Expected one observed Cursor run request");
+    const body = await response.json() as { choices?: Array<{ message?: { content?: string | null } }> };
     assertEqual(
-      observed[0]?.customSystemPrompt,
-      "",
-      "Expected proxy to avoid Cursor's restricted customSystemPrompt field",
+      body.choices?.[0]?.message?.content,
+      "Fish Price Question",
+      "Expected title agent to use Cursor's naming RPC response",
     );
+    const observed = backend.getObservedRunRequests();
+    assertEqual(observed.length, 0, "Expected title agent to bypass Cursor RunSSE chat requests");
+    const nameRequests = backend.getObservedNameAgentRequests();
+    assertEqual(nameRequests.length, 1, "Expected one observed NameAgent request");
     assert(
-      observed[0]?.latestUserText.startsWith(
-        "Generate a short 3-6 word session title. Reply with only the title and no punctuation.",
-      ),
-      `Expected latest user text to begin with OpenCode's original title prompt, got ${JSON.stringify(observed[0])}`,
-    );
-    assert(
-      observed[0]?.latestUserText.includes("What determines fish prices in Tokyo markets?"),
-      `Expected rewritten title prompt to include the original content, got ${JSON.stringify(observed[0])}`,
+      nameRequests[0]?.includes("What determines fish prices in Tokyo markets?"),
+      `Expected NameAgent request to include the title source text, got ${JSON.stringify(nameRequests)}`,
     );
   } finally {
     modules.stopProxy();
+    backend.setRunSSEMode("close-on-append");
   }
 
-  console.log("[test] Title-agent prompt rewriting OK");
+  console.log("[test] Title-agent naming RPC OK");
 }
 
 async function testPendingToolResultResumeAcrossModelSwitch(
