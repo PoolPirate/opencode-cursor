@@ -36,11 +36,17 @@ import {
   type McpToolDefinition,
 } from "../proto/agent_pb";
 import { CONNECT_END_STREAM_FLAG } from "../cursor/config";
-import { logPluginWarn } from "../logger";
+import { logPluginError, logPluginWarn } from "../logger";
 import { decodeMcpArgsMap } from "../openai/tools";
 import type { CursorSession } from "../cursor/bidi-session";
 import type { StreamState } from "./stream-state";
 import type { PendingExec } from "./types";
+
+export interface UnhandledExecInfo {
+  execCase: string;
+  execId: string;
+  execMsgId: number;
+}
 
 export function parseConnectEndStream(data: Uint8Array): Error | null {
   try {
@@ -186,6 +192,7 @@ export function processServerMessage(
   onText: (text: string, isThinking?: boolean) => void,
   onMcpExec: (exec: PendingExec) => void,
   onCheckpoint?: (checkpointBytes: Uint8Array) => void,
+  onUnhandledExec?: (info: UnhandledExecInfo) => void,
 ): void {
   const msgCase = msg.message.case;
 
@@ -199,6 +206,7 @@ export function processServerMessage(
       mcpTools,
       sendFrame,
       onMcpExec,
+      onUnhandledExec,
     );
   } else if (msgCase === "conversationCheckpointUpdate") {
     const stateStructure = msg.message.value as ConversationStateStructure;
@@ -289,6 +297,7 @@ function handleExecMessage(
   mcpTools: McpToolDefinition[],
   sendFrame: (data: Uint8Array) => void,
   onMcpExec: (exec: PendingExec) => void,
+  onUnhandledExec?: (info: UnhandledExecInfo) => void,
 ): void {
   const execCase = execMsg.message.case;
 
@@ -473,8 +482,16 @@ function handleExecMessage(
     return;
   }
 
-  // Unknown exec type — log and ignore
-  console.error(`[proxy] unhandled exec: ${execCase}`);
+  logPluginError("Unhandled Cursor exec type", {
+    execCase: execCase ?? "undefined",
+    execId: execMsg.execId,
+    execMsgId: execMsg.id,
+  });
+  onUnhandledExec?.({
+    execCase: execCase ?? "undefined",
+    execId: execMsg.execId,
+    execMsgId: execMsg.id,
+  });
 }
 
 /** Send an exec client message back to Cursor. */

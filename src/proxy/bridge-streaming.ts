@@ -11,7 +11,7 @@ import {
   type McpToolDefinition,
 } from "../proto/agent_pb";
 import type { CursorSession } from "../cursor/bidi-session";
-import { errorDetails, logPluginError } from "../logger";
+import { errorDetails, logPluginError, logPluginWarn } from "../logger";
 import {
   formatToolCallSummary,
   formatToolResultSummary,
@@ -39,6 +39,8 @@ import {
   scheduleBridgeEnd,
 } from "./stream-dispatch";
 
+const SSE_KEEPALIVE_INTERVAL_MS = 15_000;
+
 function createBridgeStreamResponse(
   bridge: CursorSession,
   heartbeatTimer: NodeJS.Timeout,
@@ -51,6 +53,13 @@ function createBridgeStreamResponse(
 ): Response {
   const completionId = `chatcmpl-${crypto.randomUUID().replace(/-/g, "").slice(0, 28)}`;
   const created = Math.floor(Date.now() / 1000);
+  let keepaliveTimer: NodeJS.Timeout | undefined;
+
+  const stopKeepalive = () => {
+    if (!keepaliveTimer) return;
+    clearInterval(keepaliveTimer);
+    keepaliveTimer = undefined;
+  };
 
   const stream = new ReadableStream({
     start(controller) {
@@ -71,6 +80,10 @@ function createBridgeStreamResponse(
         if (closed) return;
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
       };
+      const sendKeepalive = () => {
+        if (closed) return;
+        controller.enqueue(encoder.encode(": keep-alive\n\n"));
+      };
       const sendDone = () => {
         if (closed) return;
         controller.enqueue(encoder.encode("data: [DONE]\n\n"));
@@ -78,6 +91,7 @@ function createBridgeStreamResponse(
       const closeController = () => {
         if (closed) return;
         closed = true;
+        stopKeepalive();
         controller.close();
       };
       const makeChunk = (
@@ -191,6 +205,20 @@ function createBridgeStreamResponse(
               },
               (checkpointBytes) =>
                 updateConversationCheckpoint(convKey, checkpointBytes),
+              (info) => {
+                endStreamError = new Error(
+                  `Cursor requested unsupported exec type: ${info.execCase}`,
+                );
+                logPluginError("Closing Cursor bridge after unsupported exec", {
+                  modelId,
+                  bridgeKey,
+                  convKey,
+                  execCase: info.execCase,
+                  execId: info.execId,
+                  execMsgId: info.execMsgId,
+                });
+                scheduleBridgeEnd(bridge);
+              },
             );
           } catch {
             // Skip unparseable messages.
@@ -210,9 +238,24 @@ function createBridgeStreamResponse(
         },
       );
 
+      keepaliveTimer = setInterval(() => {
+        try {
+          sendKeepalive();
+        } catch (error) {
+          logPluginWarn("Failed to write SSE keepalive", {
+            modelId,
+            bridgeKey,
+            convKey,
+            ...errorDetails(error),
+          });
+          stopKeepalive();
+        }
+      }, SSE_KEEPALIVE_INTERVAL_MS);
+
       bridge.onData(processChunk);
       bridge.onClose((code) => {
         clearInterval(heartbeatTimer);
+        stopKeepalive();
         syncStoredBlobStore(convKey, blobStore);
 
         if (endStreamError) {
@@ -254,6 +297,22 @@ function createBridgeStreamResponse(
           closeController();
         }
       });
+    },
+    cancel(reason) {
+      stopKeepalive();
+      clearInterval(heartbeatTimer);
+      syncStoredBlobStore(convKey, blobStore);
+      const active = activeBridges.get(bridgeKey);
+      if (active?.bridge === bridge) {
+        activeBridges.delete(bridgeKey);
+      }
+      logPluginWarn("OpenCode client disconnected from Cursor SSE stream", {
+        modelId,
+        bridgeKey,
+        convKey,
+        reason: reason instanceof Error ? reason.message : String(reason ?? ""),
+      });
+      bridge.end();
     },
   });
 

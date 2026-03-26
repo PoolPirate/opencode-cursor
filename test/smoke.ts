@@ -26,6 +26,7 @@ type RunSSEMode =
   | "end-stream-hold"
   | "checkpoint-then-close"
   | "tool-call-pause"
+  | "unsupported-exec-pause"
   | "verbose-title-close";
 
 interface ObservedRunRequest {
@@ -219,6 +220,22 @@ function makeToolCallFrame(): Buffer {
   );
 }
 
+function makeUnsupportedExecFrame(): Buffer {
+  const execMessage = create(ExecServerMessageSchema, {
+    id: 2,
+    execId: "exec-unsupported",
+  });
+  const serverMessage = create(AgentServerMessageSchema, {
+    message: {
+      case: "execServerMessage",
+      value: execMessage,
+    },
+  });
+  return frameConnectUnaryMessage(
+    toBinary(AgentServerMessageSchema, serverMessage),
+  );
+}
+
 function makeCheckpointUpdateFrame(): Buffer {
   const userMessage = create(UserMessageSchema, {
     text: "remembered context",
@@ -384,6 +401,11 @@ async function createTestCursorBackend(): Promise<TestCursorBackend> {
 
       if (path === "/agent.v1.AgentService/RunSSE") {
         pendingRunSSE = res;
+        res.on("close", () => {
+          if (pendingRunSSE === res) {
+            pendingRunSSE = null;
+          }
+        });
         res.writeHead(200, {
           "Content-Type": "text/event-stream",
           "Cache-Control": "no-cache",
@@ -459,6 +481,14 @@ async function createTestCursorBackend(): Promise<TestCursorBackend> {
             pendingRunSSE = null;
             toolCallIssued = false;
           }
+        } else if (runSSEMode === "unsupported-exec-pause" && pendingRunSSE) {
+          pendingRunSSE.write(makeUnsupportedExecFrame());
+          setTimeout(() => {
+            try {
+              pendingRunSSE?.end();
+            } catch {}
+            pendingRunSSE = null;
+          }, 2_000);
         }
         return;
       }
@@ -515,14 +545,17 @@ async function createTestCursorBackend(): Promise<TestCursorBackend> {
       return [...observedNameAgentRequests];
     },
     async close() {
-      await Promise.all([
-        new Promise<void>((resolve, reject) =>
-          apiServer.close((error) => (error ? reject(error) : resolve())),
-        ),
-        new Promise<void>((resolve, reject) =>
-          refreshServer.close((error) => (error ? reject(error) : resolve())),
-        ),
-      ]);
+      for (const server of [apiServer, refreshServer]) {
+        try {
+          server.closeIdleConnections?.();
+        } catch {}
+        try {
+          server.closeAllConnections?.();
+        } catch {}
+        try {
+          server.close();
+        } catch {}
+      }
     },
   };
 }
@@ -1672,6 +1705,55 @@ async function testPendingToolResultResumeAcrossModelSwitch(
   console.log("[test] Pending tool result resume across model switch OK");
 }
 
+async function testUnsupportedExecFailsFast(
+  modules: TestModules,
+  backend: TestCursorBackend,
+) {
+  console.log("[test] Testing unsupported exec fast failure...");
+
+  try {
+    backend.resetObservations();
+    backend.setRunSSEMode("unsupported-exec-pause");
+    modules.stopProxy();
+    const proxyPort = await modules.startProxy(async () => "test-token");
+    const response = await fetch(
+      `http://localhost:${proxyPort}/v1/chat/completions`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "composer-2",
+          messages: [{ role: "user", content: "hello" }],
+        }),
+      },
+    );
+
+    assertEqual(
+      response.status,
+      200,
+      "Expected streaming chat completion headers to be accepted before stream failure",
+    );
+
+    const settled = await Promise.race([
+      response
+        .text()
+        .then(() => "resolved")
+        .catch(() => "rejected"),
+      new Promise<string>((resolve) => setTimeout(() => resolve("timeout"), 1_500)),
+    ]);
+
+    assert(
+      settled !== "timeout",
+      "Expected unsupported exec stream to fail fast instead of hanging",
+    );
+  } finally {
+    modules.stopProxy();
+    backend.setRunSSEMode("close-on-append");
+  }
+
+  console.log("[test] Unsupported exec fast failure OK");
+}
+
 async function main() {
   const backend = await createTestCursorBackend();
   process.env.CURSOR_API_URL = backend.apiUrl;
@@ -1694,6 +1776,7 @@ async function main() {
     await testPlainTextProviderSwitchHandoff(modules, backend);
     await testSystemPromptForwardedToCursorRunRequest(modules, backend);
     await testPendingToolResultResumeAcrossModelSwitch(modules, backend);
+    await testUnsupportedExecFailsFast(modules, backend);
     await testEndStreamStopsHeartbeats(modules, backend);
     await testExpiredTokenRefreshBeforeDiscovery(modules, backend);
     await testDiscoveryFailureAndSuccess(modules, backend);
@@ -1704,7 +1787,17 @@ async function main() {
     process.exitCode = 1;
   } finally {
     modules.stopProxy();
-    await backend.close();
+    const forcedExit = setTimeout(() => {
+      console.warn("[test] Cleanup timed out, forcing process exit");
+      process.exit(process.exitCode ?? 1);
+    }, 1_000);
+    forcedExit.unref?.();
+    try {
+      await backend.close();
+    } finally {
+      clearTimeout(forcedExit);
+    }
+    process.exit(process.exitCode ?? 1);
   }
 }
 

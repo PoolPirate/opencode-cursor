@@ -129,6 +129,22 @@ async function collectFullResponse(
             },
             (checkpointBytes) =>
               updateConversationCheckpoint(convKey, checkpointBytes),
+            (info) => {
+              endStreamError = new Error(
+                `Cursor requested unsupported exec type: ${info.execCase}`,
+              );
+              logPluginError(
+                "Closing non-streaming Cursor bridge after unsupported exec",
+                {
+                  modelId,
+                  convKey,
+                  execCase: info.execCase,
+                  execId: info.execId,
+                  execMsgId: info.execMsgId,
+                },
+              );
+              scheduleBridgeEnd(bridge);
+            },
           );
         } catch {
           // Skip unparseable messages.
