@@ -7,9 +7,6 @@ import {
   ConversationActionSchema,
   ConversationStateStructureSchema,
   ConversationTurnStructureSchema,
-  CursorRuleSchema,
-  CursorRuleTypeAgentFetchedSchema,
-  CursorRuleTypeSchema,
   ConversationStepSchema,
   ModelDetailsSchema,
   ResumeActionSchema,
@@ -28,7 +25,7 @@ export function buildCursorRequest(
   existingBlobStore?: Map<string, Uint8Array>,
 ): CursorRequestPayload {
   const blobStore = new Map<string, Uint8Array>(existingBlobStore ?? []);
-  const rules = buildCursorRules(systemPrompt);
+  const cloudRule = buildCloudRule(systemPrompt);
 
   let conversationState;
   if (checkpoint) {
@@ -99,7 +96,7 @@ export function buildCursorRequest(
     conversationState,
     action,
     blobStore,
-    rules,
+    cloudRule,
   );
 }
 
@@ -111,7 +108,7 @@ export function buildCursorResumeRequest(
   existingBlobStore?: Map<string, Uint8Array>,
 ): CursorRequestPayload {
   const blobStore = new Map<string, Uint8Array>(existingBlobStore ?? []);
-  const rules = buildCursorRules(systemPrompt);
+  const cloudRule = buildCloudRule(systemPrompt);
 
   const conversationState = fromBinary(
     ConversationStateStructureSchema,
@@ -130,7 +127,7 @@ export function buildCursorResumeRequest(
     conversationState,
     action,
     blobStore,
-    rules,
+    cloudRule,
   );
 }
 
@@ -140,7 +137,7 @@ function buildRunRequest(
   conversationState: ReturnType<typeof create<typeof ConversationStateStructureSchema>>,
   action: ReturnType<typeof create<typeof ConversationActionSchema>>,
   blobStore: Map<string, Uint8Array>,
-  rules: CursorRequestPayload["rules"],
+  cloudRule: CursorRequestPayload["cloudRule"],
 ): CursorRequestPayload {
 
   const modelDetails = create(ModelDetailsSchema, {
@@ -163,28 +160,12 @@ function buildRunRequest(
   return {
     requestBytes: toBinary(AgentClientMessageSchema, clientMessage),
     blobStore,
-    rules,
+    cloudRule,
     mcpTools: [],
   };
 }
 
-function buildCursorRules(systemPrompt: string): CursorRequestPayload["rules"] {
+function buildCloudRule(systemPrompt: string): CursorRequestPayload["cloudRule"] {
   const content = systemPrompt.trim();
-  if (!content) return [];
-
-  return [
-    create(CursorRuleSchema, {
-      fullPath: "/opencode/system-prompt.md",
-      content,
-      type: create(CursorRuleTypeSchema, {
-        type: {
-          case: "agentFetched",
-          value: create(CursorRuleTypeAgentFetchedSchema, {
-            description: "OpenCode system prompt",
-          }),
-        },
-      }),
-      source: 0,
-    }),
-  ];
+  return content || undefined;
 }
