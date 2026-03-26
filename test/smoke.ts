@@ -26,6 +26,7 @@ interface ObservedRunRequest {
   turnCount: number;
   latestUserText: string;
   turns: Array<{ userText: string; assistantText: string }>;
+  customSystemPrompt: string;
 }
 
 interface TestModules {
@@ -164,6 +165,7 @@ function decodeObservedRunRequest(payload: Uint8Array): ObservedRunRequest | nul
       ? action.value.userMessage?.text ?? ""
       : "",
     turns,
+    customSystemPrompt: runRequest.customSystemPrompt ?? "",
   };
 }
 
@@ -1277,6 +1279,56 @@ async function testPlainTextProviderSwitchHandoff(
   console.log("[test] Plain-text provider-switch handoff OK");
 }
 
+async function testSystemPromptForwardedToCursorRunRequest(
+  modules: TestModules,
+  backend: TestCursorBackend,
+) {
+  console.log("[test] Testing system prompt forwarding for title-like requests...");
+
+  try {
+    backend.resetObservations();
+    backend.setRunSSEMode("close-on-append");
+    modules.stopProxy();
+    const proxyPort = await modules.startProxy(async () => "test-token");
+
+    const response = await fetch(`http://localhost:${proxyPort}/v1/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-opencode-session-id": "ses-title-agent",
+        "x-opencode-agent": "title",
+      },
+      body: JSON.stringify({
+        model: "composer-2",
+        stream: false,
+        messages: [
+          {
+            role: "system",
+            content: "Generate a short 3-6 word session title. Reply with only the title and no punctuation.",
+          },
+          {
+            role: "user",
+            content: "What determines fish prices in Tokyo markets?",
+          },
+        ],
+      }),
+    });
+
+    assertEqual(response.status, 200, "Expected title-like request to succeed");
+    const observed = backend.getObservedRunRequests();
+    assertEqual(observed.length, 1, "Expected one observed Cursor run request");
+    assertEqual(
+      observed[0]?.customSystemPrompt,
+      "Generate a short 3-6 word session title. Reply with only the title and no punctuation.",
+      "Expected system prompt to be forwarded through customSystemPrompt for Cursor",
+    );
+  } finally {
+    modules.stopProxy();
+  }
+
+  console.log("[test] System prompt forwarding OK");
+}
+
 async function testPendingToolResultResumeAcrossModelSwitch(
   modules: TestModules,
   backend: TestCursorBackend,
@@ -1379,6 +1431,7 @@ async function main() {
     await testModelSwitchPreservesConversationState(modules, backend);
     await testProviderSwitchHistoryReconstruction(modules, backend);
     await testPlainTextProviderSwitchHandoff(modules, backend);
+    await testSystemPromptForwardedToCursorRunRequest(modules, backend);
     await testPendingToolResultResumeAcrossModelSwitch(modules, backend);
     await testEndStreamStopsHeartbeats(modules, backend);
     await testExpiredTokenRefreshBeforeDiscovery(modules, backend);

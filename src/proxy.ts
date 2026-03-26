@@ -1311,6 +1311,7 @@ function buildCursorRequest(
     action,
     modelDetails,
     conversationId,
+    customSystemPrompt: systemPrompt,
   });
 
   const clientMessage = create(AgentClientMessageSchema, {
