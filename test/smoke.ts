@@ -25,7 +25,7 @@ type RunMode =
   | "close-on-append"
   | "end-stream-hold"
   | "interaction-tool-call-pause"
-  | "interaction-then-tool-call-pause"
+  | "interaction-delayed-tool-call-pause"
   | "interaction-native-tool-complete"
   | "turn-ended-hold"
   | "checkpoint-then-close"
@@ -453,6 +453,7 @@ async function createTestCursorBackend(): Promise<TestCursorBackend> {
   let activeRunStream: http2.ServerHttp2Stream | null = null;
   let activeRunBuffer = Buffer.alloc(0);
   let activeRunCloseTimer: NodeJS.Timeout | undefined;
+  let delayedExecTimer: NodeJS.Timeout | undefined;
   let toolCallIssued = false;
 
   const clearActiveRunCloseTimer = () => {
@@ -461,8 +462,15 @@ async function createTestCursorBackend(): Promise<TestCursorBackend> {
     activeRunCloseTimer = undefined;
   };
 
+  const clearDelayedExecTimer = () => {
+    if (!delayedExecTimer) return;
+    clearTimeout(delayedExecTimer);
+    delayedExecTimer = undefined;
+  };
+
   const endActiveRunStream = () => {
     clearActiveRunCloseTimer();
+    clearDelayedExecTimer();
     try {
       activeRunStream?.end();
     } catch {}
@@ -491,11 +499,15 @@ async function createTestCursorBackend(): Promise<TestCursorBackend> {
       endActiveRunStream();
     } else if (runMode === "interaction-tool-call-pause") {
       writeRunFrame(makeInteractionToolCallCompletedFrame());
-    } else if (runMode === "interaction-then-tool-call-pause") {
+    } else if (runMode === "interaction-delayed-tool-call-pause") {
       if (!toolCallIssued) {
         toolCallIssued = true;
         writeRunFrame(makeInteractionToolCallCompletedFrame());
-        writeRunFrame(makeToolCallFrame());
+        clearDelayedExecTimer();
+        delayedExecTimer = setTimeout(() => {
+          delayedExecTimer = undefined;
+          writeRunFrame(makeToolCallFrame());
+        }, 100);
       } else {
         toolCallIssued = false;
         endActiveRunStream();
@@ -570,6 +582,7 @@ async function createTestCursorBackend(): Promise<TestCursorBackend> {
       stream.once("close", () => {
         if (activeRunStream === stream) {
           clearActiveRunCloseTimer();
+          clearDelayedExecTimer();
           activeRunStream = null;
           activeRunBuffer = Buffer.alloc(0);
         }
@@ -1504,58 +1517,60 @@ async function testTurnEndedStopsStreamingResponse(
   console.log("[test] Turn-ended bridge shutdown OK");
 }
 
-async function testInteractionToolCallCompletedIsInformationalOnly(
-  modules: TestModules,
-) {
-  console.log("[test] Testing interaction-update MCP tool call is informational only...");
-
-  const state = {
-    toolCallIndex: 0,
-    pendingExecs: [],
-    outputTokens: 0,
-    totalTokens: 0,
-    interactionToolArgsText: new Map(),
-    emittedToolCallIds: new Set(),
-  };
-  const observedExecs: any[] = [];
-  const payload = decodeConnectMessagePayloads(
-    makeInteractionToolCallCompletedFrame(),
-  )[0];
-  assert(payload, "Expected interaction tool call frame payload");
-
-  modules.processServerMessage(
-    fromBinary(AgentServerMessageSchema, payload),
-    new Map(),
-    [],
-    () => {},
-    state as any,
-    () => {},
-    (exec) => observedExecs.push(exec),
-  );
-
-  assertEqual(
-    observedExecs.length,
-    0,
-    "Expected interaction-side toolCallCompleted updates to remain informational until execServerMessage.mcpArgs arrives",
-  );
-  assertEqual(
-    state.pendingExecs.length,
-    0,
-    "Expected interaction-side toolCallCompleted updates not to create resumable pending exec state",
-  );
-
-  console.log("[test] Interaction-update MCP tool call informational handling OK");
-}
-
-async function testInteractionThenExecToolCallResumesCorrectly(
+async function testInteractionToolCallCompletesStreamingResponse(
   modules: TestModules,
   backend: TestCursorBackend,
 ) {
-  console.log("[test] Testing interaction-first then exec MCP tool call resume...");
+  console.log("[test] Testing interaction-update MCP tool call handling...");
 
   try {
     backend.resetObservations();
-    backend.setRunMode("interaction-then-tool-call-pause");
+    backend.setRunMode("interaction-tool-call-pause");
+    modules.stopProxy();
+    const proxyPort = await modules.startProxy(async () => "test-token");
+    const response = await fetch(
+      `http://localhost:${proxyPort}/v1/chat/completions`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "composer-2",
+          messages: [{ role: "user", content: "inspect the file" }],
+        }),
+      },
+    );
+
+    assertEqual(
+      response.status,
+      200,
+      "Expected streaming chat completion to succeed",
+    );
+    const body = await response.text();
+    assert(
+      body.includes('"finish_reason":"tool_calls"'),
+      `Expected SSE stream to emit tool_calls finish after interaction update, got ${JSON.stringify(body)}`,
+    );
+    assert(
+      body.includes("data: [DONE]"),
+      `Expected SSE stream to terminate after interaction update tool call, got ${JSON.stringify(body)}`,
+    );
+  } finally {
+    modules.stopProxy();
+    backend.setRunMode("close-on-append");
+  }
+
+  console.log("[test] Interaction-update MCP tool call handling OK");
+}
+
+async function testInteractionThenDelayedExecToolCallResumesCorrectly(
+  modules: TestModules,
+  backend: TestCursorBackend,
+) {
+  console.log("[test] Testing interaction-first then delayed exec MCP tool call resume...");
+
+  try {
+    backend.resetObservations();
+    backend.setRunMode("interaction-delayed-tool-call-pause");
     modules.stopProxy();
     const proxyPort = await modules.startProxy(async () => "test-token");
     const headers = {
@@ -1635,14 +1650,14 @@ async function testInteractionThenExecToolCallResumesCorrectly(
     assertEqual(
       observed.length,
       1,
-      "Expected interaction-first then exec-side tool flow to resume the existing Cursor bridge instead of starting a new run request",
+      "Expected interaction-first then delayed exec-side tool flow to resume the existing Cursor bridge instead of starting a new run request",
     );
   } finally {
     modules.stopProxy();
     backend.setRunMode("close-on-append");
   }
 
-  console.log("[test] Interaction-first then exec MCP tool call resume OK");
+  console.log("[test] Interaction-first then delayed exec MCP tool call resume OK");
 }
 
 async function testNativeInteractionToolCallCompletedDoesNotAbort(
@@ -2786,8 +2801,8 @@ async function main() {
     await testUnsupportedSetupVmInteractionQueryFailsFast(modules, backend);
     await testEndStreamStopsHeartbeats(modules, backend);
     await testTurnEndedStopsStreamingResponse(modules, backend);
-    await testInteractionToolCallCompletedIsInformationalOnly(modules);
-    await testInteractionThenExecToolCallResumesCorrectly(modules, backend);
+    await testInteractionToolCallCompletesStreamingResponse(modules, backend);
+    await testInteractionThenDelayedExecToolCallResumesCorrectly(modules, backend);
     await testNativeInteractionToolCallCompletedDoesNotAbort(modules, backend);
     await testExpiredTokenRefreshBeforeDiscovery(modules, backend);
     await testDiscoveryFailureAndSuccess(modules, backend);

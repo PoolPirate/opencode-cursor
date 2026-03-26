@@ -372,12 +372,42 @@ export async function handleStreamingResponse(
   );
 }
 
-export function handleToolResultResume(
+async function waitForResolvablePendingExecs(
+  active: ActiveBridge,
+  toolResults: ToolResultInfo[],
+  timeoutMs = 2_000,
+): Promise<void> {
+  const pendingToolCallIds = new Set(toolResults.map((result) => result.toolCallId));
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const unresolved = active.pendingExecs.filter(
+      (exec) => pendingToolCallIds.has(exec.toolCallId) && exec.execMsgId === 0,
+    );
+    if (unresolved.length === 0) {
+      return;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+
+  const unresolved = active.pendingExecs.filter(
+    (exec) => pendingToolCallIds.has(exec.toolCallId) && exec.execMsgId === 0,
+  );
+  if (unresolved.length > 0) {
+    logPluginWarn("Cursor exec metadata did not arrive before tool-result resume", {
+      bridgeToolCallIds: unresolved.map((exec) => exec.toolCallId),
+      modelId: active.modelId,
+    });
+  }
+}
+
+export async function handleToolResultResume(
   active: ActiveBridge,
   toolResults: ToolResultInfo[],
   bridgeKey: string,
   convKey: string,
-): Response {
+): Promise<Response> {
   const {
     bridge,
     heartbeatTimer,
@@ -396,6 +426,8 @@ export function handleToolResultResume(
       .filter(Boolean)
       .join("\n\n"),
   };
+
+  await waitForResolvablePendingExecs(active, toolResults);
 
   for (const exec of pendingExecs) {
     const result = toolResults.find(
