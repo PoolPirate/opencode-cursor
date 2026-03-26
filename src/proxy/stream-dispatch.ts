@@ -47,6 +47,7 @@ import {
   WriteShellStdinResultSchema,
   type AgentServerMessage,
   type ConversationStateStructure,
+  type CursorRule,
   type ExecServerMessage,
   type KvServerMessage,
   type McpToolDefinition,
@@ -213,6 +214,7 @@ export function computeUsage(state: StreamState) {
 export function processServerMessage(
   msg: AgentServerMessage,
   blobStore: Map<string, Uint8Array>,
+  rules: CursorRule[],
   mcpTools: McpToolDefinition[],
   sendFrame: (data: Uint8Array) => void,
   state: StreamState,
@@ -238,6 +240,7 @@ export function processServerMessage(
   } else if (msgCase === "execServerMessage") {
     handleExecMessage(
       msg.message.value as ExecServerMessage,
+      rules,
       mcpTools,
       sendFrame,
       state,
@@ -543,6 +546,7 @@ function handleKvMessage(
 
 function handleExecMessage(
   execMsg: ExecServerMessage,
+  rules: CursorRule[],
   mcpTools: McpToolDefinition[],
   sendFrame: (data: Uint8Array) => void,
   state: StreamState,
@@ -563,7 +567,7 @@ function handleExecMessage(
       mcpToolCount: mcpTools.length,
     });
     const requestContext = create(RequestContextSchema, {
-      rules: [],
+      rules,
       repositoryInfo: [],
       tools: mcpTools,
       gitRepos: [],

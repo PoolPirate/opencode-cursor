@@ -2,6 +2,7 @@ import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import {
   AgentClientMessageSchema,
   AgentServerMessageSchema,
+  type CursorRule,
   ExecClientMessageSchema,
   McpErrorSchema,
   McpResultSchema,
@@ -50,6 +51,7 @@ function createBridgeStreamResponse(
   bridge: CursorSession,
   heartbeatTimer: NodeJS.Timeout,
   blobStore: Map<string, Uint8Array>,
+  rules: CursorRule[],
   mcpTools: McpToolDefinition[],
   modelId: string,
   bridgeKey: string,
@@ -144,6 +146,7 @@ function createBridgeStreamResponse(
             processServerMessage(
               serverMessage,
               blobStore,
+              rules,
               mcpTools,
               (data) => bridge.write(data),
               state,
@@ -214,6 +217,7 @@ function createBridgeStreamResponse(
                   bridge,
                   heartbeatTimer,
                   blobStore,
+                  rules,
                   mcpTools,
                   pendingExecs: state.pendingExecs,
                   modelId,
@@ -296,6 +300,7 @@ function createBridgeStreamResponse(
         bridgeKey,
         convKey,
         mcpToolCount: mcpTools.length,
+        ruleCount: rules.length,
       });
 
       bridge.onData(processChunk);
@@ -388,6 +393,7 @@ export async function handleStreamingResponse(
     bridge,
     heartbeatTimer,
     payload.blobStore,
+    payload.rules,
     payload.mcpTools,
     modelId,
     bridgeKey,
@@ -438,6 +444,7 @@ export async function handleToolResultResume(
     bridge,
     heartbeatTimer,
     blobStore,
+    rules,
     mcpTools,
     pendingExecs,
     modelId,
@@ -553,6 +560,7 @@ export async function handleToolResultResume(
     bridge,
     heartbeatTimer,
     blobStore,
+    rules,
     mcpTools,
     modelId,
     bridgeKey,

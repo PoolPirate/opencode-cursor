@@ -1,14 +1,16 @@
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
-import { createHash } from "node:crypto";
 import {
   AgentClientMessageSchema,
   AgentRunRequestSchema,
+  AgentConversationTurnStructureSchema,
+  AssistantMessageSchema,
   ConversationActionSchema,
   ConversationStateStructureSchema,
-  ConversationStepSchema,
-  AgentConversationTurnStructureSchema,
   ConversationTurnStructureSchema,
-  AssistantMessageSchema,
+  CursorRuleSchema,
+  CursorRuleTypeAgentFetchedSchema,
+  CursorRuleTypeSchema,
+  ConversationStepSchema,
   ModelDetailsSchema,
   ResumeActionSchema,
   UserMessageActionSchema,
@@ -26,14 +28,7 @@ export function buildCursorRequest(
   existingBlobStore?: Map<string, Uint8Array>,
 ): CursorRequestPayload {
   const blobStore = new Map<string, Uint8Array>(existingBlobStore ?? []);
-
-  // System prompt → blob store (Cursor requests it back via KV handshake)
-  const systemJson = JSON.stringify({ role: "system", content: systemPrompt });
-  const systemBytes = new TextEncoder().encode(systemJson);
-  const systemBlobId = new Uint8Array(
-    createHash("sha256").update(systemBytes).digest(),
-  );
-  blobStore.set(Buffer.from(systemBlobId).toString("hex"), systemBytes);
+  const rules = buildCursorRules(systemPrompt);
 
   let conversationState;
   if (checkpoint) {
@@ -72,7 +67,7 @@ export function buildCursorRequest(
     }
 
     conversationState = create(ConversationStateStructureSchema, {
-      rootPromptMessagesJson: [systemBlobId],
+      rootPromptMessagesJson: [],
       turns: turnBytes,
       todos: [],
       pendingToolCalls: [],
@@ -104,6 +99,7 @@ export function buildCursorRequest(
     conversationState,
     action,
     blobStore,
+    rules,
   );
 }
 
@@ -115,13 +111,7 @@ export function buildCursorResumeRequest(
   existingBlobStore?: Map<string, Uint8Array>,
 ): CursorRequestPayload {
   const blobStore = new Map<string, Uint8Array>(existingBlobStore ?? []);
-
-  const systemJson = JSON.stringify({ role: "system", content: systemPrompt });
-  const systemBytes = new TextEncoder().encode(systemJson);
-  const systemBlobId = new Uint8Array(
-    createHash("sha256").update(systemBytes).digest(),
-  );
-  blobStore.set(Buffer.from(systemBlobId).toString("hex"), systemBytes);
+  const rules = buildCursorRules(systemPrompt);
 
   const conversationState = fromBinary(
     ConversationStateStructureSchema,
@@ -140,6 +130,7 @@ export function buildCursorResumeRequest(
     conversationState,
     action,
     blobStore,
+    rules,
   );
 }
 
@@ -149,6 +140,7 @@ function buildRunRequest(
   conversationState: ReturnType<typeof create<typeof ConversationStateStructureSchema>>,
   action: ReturnType<typeof create<typeof ConversationActionSchema>>,
   blobStore: Map<string, Uint8Array>,
+  rules: CursorRequestPayload["rules"],
 ): CursorRequestPayload {
 
   const modelDetails = create(ModelDetailsSchema, {
@@ -171,6 +163,28 @@ function buildRunRequest(
   return {
     requestBytes: toBinary(AgentClientMessageSchema, clientMessage),
     blobStore,
+    rules,
     mcpTools: [],
   };
+}
+
+function buildCursorRules(systemPrompt: string): CursorRequestPayload["rules"] {
+  const content = systemPrompt.trim();
+  if (!content) return [];
+
+  return [
+    create(CursorRuleSchema, {
+      fullPath: "/opencode/system-prompt.md",
+      content,
+      type: create(CursorRuleTypeSchema, {
+        type: {
+          case: "agentFetched",
+          value: create(CursorRuleTypeAgentFetchedSchema, {
+            description: "OpenCode system prompt",
+          }),
+        },
+      }),
+      source: 0,
+    }),
+  ];
 }

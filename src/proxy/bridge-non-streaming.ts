@@ -108,6 +108,7 @@ async function collectFullResponse(
           processServerMessage(
             serverMessage,
             payload.blobStore,
+            payload.rules,
             payload.mcpTools,
             (data) => bridge.write(data),
             state,

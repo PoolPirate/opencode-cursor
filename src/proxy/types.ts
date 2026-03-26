@@ -1,10 +1,11 @@
 import type { CursorSession } from "../cursor/bidi-session";
+import type { CursorRule, McpToolDefinition } from "../proto/agent_pb";
 import type { ConversationRequestMetadata } from "./conversation-meta";
-import type { McpToolDefinition } from "../proto/agent_pb";
 
 export interface CursorRequestPayload {
   requestBytes: Uint8Array;
   blobStore: Map<string, Uint8Array>;
+  rules: CursorRule[];
   mcpTools: McpToolDefinition[];
 }
 
@@ -26,6 +27,7 @@ export interface ActiveBridge {
   bridge: CursorSession;
   heartbeatTimer: NodeJS.Timeout;
   blobStore: Map<string, Uint8Array>;
+  rules: CursorRule[];
   mcpTools: McpToolDefinition[];
   pendingExecs: PendingExec[];
   modelId: string;
