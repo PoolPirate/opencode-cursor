@@ -159,6 +159,7 @@ function createBridgeStreamResponse(
                 }
               },
               (exec) => {
+                state.pendingExecs.push(exec);
                 mcpExecReceived = true;
 
                 const flushed = tagFilter.flush();

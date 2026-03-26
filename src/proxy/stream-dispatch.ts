@@ -306,7 +306,6 @@ export function processServerMessage(
       msg.message.value as ExecServerMessage,
       mcpTools,
       sendFrame,
-      state,
       onMcpExec,
       onUnhandledExec,
     );
@@ -649,7 +648,6 @@ function handleExecMessage(
   execMsg: ExecServerMessage,
   mcpTools: McpToolDefinition[],
   sendFrame: (data: Uint8Array) => void,
-  state: StreamState,
   onMcpExec: (exec: PendingExec) => void,
   onUnhandledExec?: (info: UnhandledExecInfo) => void,
 ): void {
@@ -679,14 +677,13 @@ function handleExecMessage(
   if (execCase === "mcpArgs") {
     const mcpArgs = execMsg.message.value;
     const decoded = decodeMcpArgsMap(mcpArgs.args ?? {});
-    const exec = {
+    onMcpExec({
       execId: execMsg.execId,
       execMsgId: execMsg.id,
       toolCallId: mcpArgs.toolCallId || crypto.randomUUID(),
       toolName: mcpArgs.toolName || mcpArgs.name,
       decodedArgs: JSON.stringify(decoded),
-    };
-    emitPendingExec(exec, state, onMcpExec);
+    });
     return;
   }
 
