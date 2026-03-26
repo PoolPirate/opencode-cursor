@@ -1087,7 +1087,10 @@ async function testAgentScopedSessionIsolation(
       headers: titleHeaders,
       body: JSON.stringify({
         model: "composer-2",
-        messages: [{ role: "user", content: "generate a short title" }],
+        messages: [
+          { role: "user", content: "Generate a title for this conversation:\n" },
+          { role: "user", content: "generate a short title" },
+        ],
       }),
     }).then((response) => response.text());
 
@@ -1323,7 +1326,7 @@ async function testSystemPromptForwardedToCursorRunRequest(
   modules: TestModules,
   backend: TestCursorBackend,
 ) {
-  console.log("[test] Testing title-agent naming RPC...");
+  console.log("[test] Testing source-backed title-agent naming RPC...");
 
   try {
     backend.resetObservations();
@@ -1336,7 +1339,6 @@ async function testSystemPromptForwardedToCursorRunRequest(
       headers: {
         "Content-Type": "application/json",
         "x-opencode-session-id": "ses-title-agent",
-        "x-opencode-agent": "title",
       },
       body: JSON.stringify({
         model: "composer-2",
@@ -1344,7 +1346,11 @@ async function testSystemPromptForwardedToCursorRunRequest(
         messages: [
           {
             role: "system",
-            content: "Generate a short 3-6 word session title. Reply with only the title and no punctuation.",
+            content: "You are a title generator. You output ONLY a thread title. Nothing else.",
+          },
+          {
+            role: "user",
+            content: "Generate a title for this conversation:\n",
           },
           {
             role: "user",
@@ -1359,12 +1365,16 @@ async function testSystemPromptForwardedToCursorRunRequest(
     assertEqual(
       body.choices?.[0]?.message?.content,
       "Fish Price Question",
-      "Expected title agent to use Cursor's naming RPC response",
+      "Expected title request to use Cursor's naming RPC response",
     );
     const observed = backend.getObservedRunRequests();
-    assertEqual(observed.length, 0, "Expected title agent to bypass Cursor RunSSE chat requests");
+    assertEqual(observed.length, 0, "Expected title request marker to bypass Cursor RunSSE chat requests");
     const nameRequests = backend.getObservedNameAgentRequests();
     assertEqual(nameRequests.length, 1, "Expected one observed NameAgent request");
+    assert(
+      !nameRequests[0]?.includes("Generate a title for this conversation:"),
+      `Expected NameAgent request to omit the OpenCode title marker, got ${JSON.stringify(nameRequests)}`,
+    );
     assert(
       nameRequests[0]?.includes("What determines fish prices in Tokyo markets?"),
       `Expected NameAgent request to include the title source text, got ${JSON.stringify(nameRequests)}`,
@@ -1374,7 +1384,7 @@ async function testSystemPromptForwardedToCursorRunRequest(
     backend.setRunSSEMode("close-on-append");
   }
 
-  console.log("[test] Title-agent naming RPC OK");
+  console.log("[test] Source-backed title-agent naming RPC OK");
 }
 
 async function testPendingToolResultResumeAcrossModelSwitch(

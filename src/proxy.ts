@@ -76,6 +76,7 @@ const CURSOR_API_URL = process.env.CURSOR_API_URL ?? "https://api2.cursor.sh";
 const CURSOR_CLIENT_VERSION = "cli-2026.01.09-231024f";
 const CURSOR_CONNECT_PROTOCOL_VERSION = "1";
 const CONNECT_END_STREAM_FLAG = 0b00000010;
+const OPENCODE_TITLE_REQUEST_MARKER = "Generate a title for this conversation:";
 const SSE_HEADERS = {
   "Content-Type": "text/event-stream",
   "Cache-Control": "no-cache",
@@ -831,7 +832,8 @@ function handleChatCompletion(
   } = parsed;
   const modelId = body.model;
   const normalizedAgentKey = normalizeAgentKey(context.agentKey);
-  const isTitleAgent = normalizedAgentKey === "title";
+  const titleDetection = detectTitleRequest(body);
+  const isTitleAgent = titleDetection.matched;
   if (isTitleAgent) {
     const titleSourceText = buildTitleSourceText(userText, turns, pendingAssistantSummary, toolResults);
     if (!titleSourceText) {
@@ -1211,17 +1213,41 @@ function buildTitleSourceText(
   pendingAssistantSummary: string,
   toolResults: ToolResultInfo[],
 ): string {
-  const history = turns.map((turn) => [turn.userText.trim(), turn.assistantText.trim()].filter(Boolean).join("\n")).filter(Boolean);
+  const history = turns
+    .map((turn) => [
+      isTitleRequestMarker(turn.userText) ? "" : turn.userText.trim(),
+      turn.assistantText.trim(),
+    ].filter(Boolean).join("\n"))
+    .filter(Boolean);
   if (pendingAssistantSummary.trim()) {
     history.push(pendingAssistantSummary.trim());
   }
   if (toolResults.length > 0) {
     history.push(toolResults.map(formatToolResultSummary).join("\n\n"));
   }
-  if (userText.trim()) {
+  if (userText.trim() && !isTitleRequestMarker(userText)) {
     history.push(userText.trim());
   }
   return history.join("\n\n").trim();
+}
+
+function detectTitleRequest(
+  body: ChatCompletionRequest,
+): { matched: boolean; reason: string } {
+  if ((body.tools?.length ?? 0) > 0) {
+    return { matched: false, reason: "tools-present" };
+  }
+
+  const firstNonSystem = body.messages.find((message) => message.role !== "system");
+  if (firstNonSystem?.role === "user" && isTitleRequestMarker(textContent(firstNonSystem.content))) {
+    return { matched: true, reason: "opencode-title-marker" };
+  }
+
+  return { matched: false, reason: "no-title-marker" };
+}
+
+function isTitleRequestMarker(text: string): boolean {
+  return text.trim() === OPENCODE_TITLE_REQUEST_MARKER;
 }
 
 function selectToolsForChoice(
