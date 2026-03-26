@@ -1572,6 +1572,100 @@ async function testInteractionToolCallCompletesStreamingResponse(
   console.log("[test] Interaction-update MCP tool call handling OK");
 }
 
+async function testInteractionOnlyToolCallResumeFailsFast(
+  modules: TestModules,
+  backend: TestCursorBackend,
+) {
+  console.log("[test] Testing interaction-only MCP tool call resume fails fast...");
+
+  try {
+    backend.resetObservations();
+    backend.setRunMode("interaction-tool-call-pause");
+    modules.stopProxy();
+    const proxyPort = await modules.startProxy(async () => "test-token");
+    const headers = {
+      "Content-Type": "application/json",
+      "x-session-id": "ses-interaction-only-resume",
+      "x-opencode-agent": "build",
+    };
+
+    const firstResponse = await fetch(
+      `http://localhost:${proxyPort}/v1/chat/completions`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          model: "composer-2",
+          messages: [{ role: "user", content: "inspect the file" }],
+        }),
+      },
+    );
+
+    assertEqual(firstResponse.status, 200, "Expected initial request to succeed");
+    const firstBody = await firstResponse.text();
+    assert(
+      firstBody.includes('"finish_reason":"tool_calls"'),
+      `Expected first response to pause for tool calls, got ${JSON.stringify(firstBody)}`,
+    );
+
+    const secondResponse = await fetch(
+      `http://localhost:${proxyPort}/v1/chat/completions`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          model: "composer-2",
+          messages: [
+            { role: "user", content: "inspect the file" },
+            {
+              role: "assistant",
+              content: null,
+              tool_calls: [
+                {
+                  id: "interaction-call-1",
+                  type: "function",
+                  function: {
+                    name: "read_file",
+                    arguments: JSON.stringify({ path: "src/index.ts" }),
+                  },
+                },
+              ],
+            },
+            {
+              role: "tool",
+              tool_call_id: "interaction-call-1",
+              content: "file contents",
+            },
+          ],
+        }),
+      },
+    );
+
+    assertEqual(
+      secondResponse.status,
+      409,
+      "Expected interaction-only tool-result resume to fail fast when Cursor never provides exec metadata",
+    );
+    const secondBody = await secondResponse.text();
+    assert(
+      secondBody.includes("cursor_missing_exec_metadata"),
+      `Expected explicit missing exec metadata error, got ${JSON.stringify(secondBody)}`,
+    );
+
+    const observed = backend.getObservedRunRequests();
+    assertEqual(
+      observed.length,
+      1,
+      "Expected failed interaction-only tool-result resume not to start a fresh run request",
+    );
+  } finally {
+    modules.stopProxy();
+    backend.setRunMode("close-on-append");
+  }
+
+  console.log("[test] Interaction-only MCP tool call resume fail-fast OK");
+}
+
 async function testInteractionThenDelayedExecToolCallResumesCorrectly(
   modules: TestModules,
   backend: TestCursorBackend,
@@ -2812,6 +2906,7 @@ async function main() {
     await testEndStreamStopsHeartbeats(modules, backend);
     await testTurnEndedStopsStreamingResponse(modules, backend);
     await testInteractionToolCallCompletesStreamingResponse(modules, backend);
+    await testInteractionOnlyToolCallResumeFailsFast(modules, backend);
     await testInteractionThenDelayedExecToolCallResumesCorrectly(modules, backend);
     await testNativeInteractionToolCallCompletedDoesNotAbort(modules, backend);
     await testExpiredTokenRefreshBeforeDiscovery(modules, backend);

@@ -381,7 +381,7 @@ async function waitForResolvablePendingExecs(
   active: ActiveBridge,
   toolResults: ToolResultInfo[],
   timeoutMs = 2_000,
-): Promise<void> {
+): Promise<typeof active.pendingExecs> {
   const pendingToolCallIds = new Set(toolResults.map((result) => result.toolCallId));
   const deadline = Date.now() + timeoutMs;
 
@@ -390,7 +390,7 @@ async function waitForResolvablePendingExecs(
       (exec) => pendingToolCallIds.has(exec.toolCallId) && exec.execMsgId === 0,
     );
     if (unresolved.length === 0) {
-      return;
+      return unresolved;
     }
 
     await new Promise((resolve) => setTimeout(resolve, 25));
@@ -405,6 +405,8 @@ async function waitForResolvablePendingExecs(
       modelId: active.modelId,
     });
   }
+
+  return unresolved;
 }
 
 export async function handleToolResultResume(
@@ -440,7 +442,7 @@ export async function handleToolResultResume(
     pendingExecs,
   });
 
-  await waitForResolvablePendingExecs(active, toolResults);
+  const unresolved = await waitForResolvablePendingExecs(active, toolResults);
 
   logPluginInfo("Resolved pending exec state before Cursor tool-result resume", {
     bridgeKey,
@@ -448,7 +450,24 @@ export async function handleToolResultResume(
     modelId,
     toolResults,
     pendingExecs,
+    unresolvedPendingExecs: unresolved,
   });
+
+  if (unresolved.length > 0) {
+    clearInterval(heartbeatTimer);
+    bridge.end();
+    return new Response(
+      JSON.stringify({
+        error: {
+          message:
+            "Cursor requested a tool call but never provided resumable exec metadata. Aborting instead of retrying with synthetic ids.",
+          type: "invalid_request_error",
+          code: "cursor_missing_exec_metadata",
+        },
+      }),
+      { status: 409, headers: { "Content-Type": "application/json" } },
+    );
+  }
 
   for (const exec of pendingExecs) {
     const result = toolResults.find(
