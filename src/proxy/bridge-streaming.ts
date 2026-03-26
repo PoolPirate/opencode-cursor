@@ -293,8 +293,23 @@ function createBridgeStreamResponse(
         }
       }, SSE_KEEPALIVE_INTERVAL_MS);
 
+      logPluginInfo("Opened Cursor streaming bridge", {
+        modelId,
+        bridgeKey,
+        convKey,
+        mcpToolCount: mcpTools.length,
+      });
+
       bridge.onData(processChunk);
       bridge.onClose((code) => {
+        logPluginInfo("Cursor streaming bridge closed", {
+          modelId,
+          bridgeKey,
+          convKey,
+          code,
+          mcpExecReceived,
+          hadEndStreamError: Boolean(endStreamError),
+        });
         clearInterval(heartbeatTimer);
         stopKeepalive();
         syncStoredBlobStore(convKey, blobStore);
@@ -361,6 +376,12 @@ export async function handleStreamingResponse(
   convKey: string,
   metadata: ConversationRequestMetadata,
 ): Promise<Response> {
+  logPluginInfo("Starting Cursor streaming response", {
+    modelId,
+    bridgeKey,
+    convKey,
+    mcpToolCount: payload.mcpTools.length,
+  });
   const { bridge, heartbeatTimer } = await startBridge(
     accessToken,
     payload.requestBytes,

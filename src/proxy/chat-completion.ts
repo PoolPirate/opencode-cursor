@@ -46,6 +46,19 @@ export function handleChatCompletion(
   } = parsed;
   const modelId = body.model;
   const normalizedAgentKey = normalizeAgentKey(context.agentKey);
+  logPluginInfo("Handling Cursor chat completion request", {
+    modelId,
+    stream: body.stream !== false,
+    messageCount: body.messages.length,
+    toolCount: body.tools?.length ?? 0,
+    toolChoice: body.tool_choice,
+    sessionId: context.sessionId,
+    agentKey: normalizedAgentKey,
+    parsedUserText: userText,
+    parsedToolResults: toolResults,
+    hasPendingAssistantSummary: pendingAssistantSummary.trim().length > 0,
+    turnCount: turns.length,
+  });
   const titleDetection = detectTitleRequest(body);
   const isTitleAgent = titleDetection.matched;
   if (isTitleAgent) {
@@ -102,6 +115,14 @@ export function handleChatCompletion(
     context.agentKey,
   );
   const activeBridge = activeBridges.get(bridgeKey);
+  logPluginInfo("Resolved Cursor conversation keys", {
+    modelId,
+    bridgeKey,
+    convKey,
+    hasActiveBridge: Boolean(activeBridge),
+    sessionId: context.sessionId,
+    agentKey: normalizedAgentKey,
+  });
 
   if (activeBridge && toolResults.length > 0) {
     logPluginInfo("Matched OpenAI tool results to active Cursor bridge", {
@@ -197,6 +218,16 @@ export function handleChatCompletion(
     stored.blobStore,
   );
   payload.mcpTools = mcpTools;
+  logPluginInfo("Built Cursor run request payload", {
+    modelId,
+    bridgeKey,
+    convKey,
+    mcpToolCount: mcpTools.length,
+    conversationId: stored.conversationId,
+    hasCheckpoint: Boolean(stored.checkpoint),
+    replayTurnCount: replayTurns.length,
+    effectiveUserText,
+  });
 
   if (body.stream === false) {
     return handleNonStreamingResponse(payload, accessToken, modelId, convKey, {

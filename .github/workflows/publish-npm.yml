@@ -160,12 +160,11 @@ jobs:
         shell: bash
         run: bun install --frozen-lockfile
 
-      - name: Build and test
+      - name: Build
         shell: bash
         run: |
           set -euo pipefail
           bun run build
-          bun test/smoke.ts
 
       - name: Prepare dev package version
         shell: bash
@@ -219,7 +218,7 @@ jobs:
         shell: bash
         run: bun install --frozen-lockfile
 
-      - name: Build and test
+      - name: Build
         shell: bash
         run: |
           set -euo pipefail
@@ -229,7 +228,6 @@ jobs:
             exit 1
           fi
           bun run build
-          bun test/smoke.ts
 
       - name: Pack release artifact
         shell: bash

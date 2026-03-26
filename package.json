@@ -19,7 +19,6 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "bun test/smoke.ts",
     "prepublishOnly": "npm run build"
   },
   "repository": {

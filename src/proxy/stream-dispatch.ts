@@ -319,6 +319,11 @@ export function processServerMessage(
   onUnhandledExec?: (info: UnhandledExecInfo) => void,
 ): void {
   const msgCase = msg.message.case;
+  if (msgCase !== "conversationCheckpointUpdate") {
+    logPluginInfo("Received Cursor server message", {
+      messageCase: msgCase ?? "undefined",
+    });
+  }
 
   if (msgCase === "interactionUpdate") {
     handleInteractionUpdate(
@@ -376,6 +381,18 @@ function handleInteractionUpdate(
   onUnsupportedMessage?: (info: UnsupportedServerMessageInfo) => void,
 ): void {
   const updateCase = update.message?.case;
+  if (
+    updateCase !== "textDelta" &&
+    updateCase !== "thinkingDelta" &&
+    updateCase !== "tokenDelta"
+  ) {
+    logPluginInfo("Received Cursor interaction update", {
+      updateCase: updateCase ?? "undefined",
+      callId: update.message?.value?.callId,
+      modelCallId: update.message?.value?.modelCallId,
+      toolCase: update.message?.value?.toolCall?.tool?.case,
+    });
+  }
 
   if (updateCase === "textDelta") {
     const delta = update.message.value.text || "";
@@ -699,8 +716,18 @@ function handleExecMessage(
   onUnhandledExec?: (info: UnhandledExecInfo) => void,
 ): void {
   const execCase = execMsg.message.case;
+  logPluginInfo("Received Cursor exec message", {
+    execCase: execCase ?? "undefined",
+    execId: execMsg.execId,
+    execMsgId: execMsg.id,
+  });
 
   if (execCase === "requestContextArgs") {
+    logPluginInfo("Responding to Cursor requestContextArgs", {
+      execId: execMsg.execId,
+      execMsgId: execMsg.id,
+      mcpToolCount: mcpTools.length,
+    });
     const requestContext = create(RequestContextSchema, {
       rules: [],
       repositoryInfo: [],
@@ -751,6 +778,11 @@ function handleExecMessage(
     "Tool not available in this environment. Use the MCP tools provided instead.";
 
   if (execCase === "readArgs") {
+    logPluginInfo("Rejecting native Cursor read tool in favor of MCP", {
+      execId: execMsg.execId,
+      execMsgId: execMsg.id,
+      path: execMsg.message.value.path,
+    });
     const args = execMsg.message.value;
     const result = create(ReadResultSchema, {
       result: {
@@ -765,6 +797,11 @@ function handleExecMessage(
     return;
   }
   if (execCase === "lsArgs") {
+    logPluginInfo("Rejecting native Cursor ls tool in favor of MCP", {
+      execId: execMsg.execId,
+      execMsgId: execMsg.id,
+      path: execMsg.message.value.path,
+    });
     const args = execMsg.message.value;
     const result = create(LsResultSchema, {
       result: {
@@ -779,6 +816,10 @@ function handleExecMessage(
     return;
   }
   if (execCase === "grepArgs") {
+    logPluginInfo("Rejecting native Cursor grep tool in favor of MCP", {
+      execId: execMsg.execId,
+      execMsgId: execMsg.id,
+    });
     const result = create(GrepResultSchema, {
       result: {
         case: "error",
@@ -789,6 +830,11 @@ function handleExecMessage(
     return;
   }
   if (execCase === "writeArgs") {
+    logPluginInfo("Rejecting native Cursor write tool in favor of MCP", {
+      execId: execMsg.execId,
+      execMsgId: execMsg.id,
+      path: execMsg.message.value.path,
+    });
     const args = execMsg.message.value;
     const result = create(WriteResultSchema, {
       result: {
@@ -803,6 +849,11 @@ function handleExecMessage(
     return;
   }
   if (execCase === "deleteArgs") {
+    logPluginInfo("Rejecting native Cursor delete tool in favor of MCP", {
+      execId: execMsg.execId,
+      execMsgId: execMsg.id,
+      path: execMsg.message.value.path,
+    });
     const args = execMsg.message.value;
     const result = create(DeleteResultSchema, {
       result: {
@@ -817,6 +868,13 @@ function handleExecMessage(
     return;
   }
   if (execCase === "shellArgs" || execCase === "shellStreamArgs") {
+    logPluginInfo("Rejecting native Cursor shell tool in favor of MCP", {
+      execId: execMsg.execId,
+      execMsgId: execMsg.id,
+      command: execMsg.message.value.command ?? "",
+      workingDirectory: execMsg.message.value.workingDirectory ?? "",
+      execCase,
+    });
     const args = execMsg.message.value;
     const result = create(ShellResultSchema, {
       result: {
@@ -833,6 +891,12 @@ function handleExecMessage(
     return;
   }
   if (execCase === "backgroundShellSpawnArgs") {
+    logPluginInfo("Rejecting native Cursor background shell tool in favor of MCP", {
+      execId: execMsg.execId,
+      execMsgId: execMsg.id,
+      command: execMsg.message.value.command ?? "",
+      workingDirectory: execMsg.message.value.workingDirectory ?? "",
+    });
     const args = execMsg.message.value;
     const result = create(BackgroundShellSpawnResultSchema, {
       result: {
@@ -849,6 +913,10 @@ function handleExecMessage(
     return;
   }
   if (execCase === "writeShellStdinArgs") {
+    logPluginInfo("Rejecting native Cursor shell stdin tool in favor of MCP", {
+      execId: execMsg.execId,
+      execMsgId: execMsg.id,
+    });
     const result = create(WriteShellStdinResultSchema, {
       result: {
         case: "error",
@@ -859,6 +927,11 @@ function handleExecMessage(
     return;
   }
   if (execCase === "fetchArgs") {
+    logPluginInfo("Rejecting native Cursor fetch tool in favor of MCP", {
+      execId: execMsg.execId,
+      execMsgId: execMsg.id,
+      url: execMsg.message.value.url,
+    });
     const args = execMsg.message.value;
     const result = create(FetchResultSchema, {
       result: {
@@ -873,6 +946,11 @@ function handleExecMessage(
     return;
   }
   if (execCase === "diagnosticsArgs") {
+    logPluginInfo("Rejecting native Cursor diagnostics tool in favor of MCP", {
+      execId: execMsg.execId,
+      execMsgId: execMsg.id,
+      path: execMsg.message.value.path,
+    });
     const result = create(DiagnosticsResultSchema, {});
     sendExecResult(execMsg, "diagnosticsResult", result, sendFrame);
     return;
@@ -887,6 +965,12 @@ function handleExecMessage(
   };
   const resultCase = miscCaseMap[execCase as string];
   if (resultCase) {
+    logPluginInfo("Responding to miscellaneous Cursor exec message", {
+      execCase,
+      execId: execMsg.execId,
+      execMsgId: execMsg.id,
+      resultCase,
+    });
     sendExecResult(execMsg, resultCase, create(McpResultSchema, {}), sendFrame);
     return;
   }
