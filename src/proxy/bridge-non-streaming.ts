@@ -19,6 +19,7 @@ import {
   processServerMessage,
   scheduleBridgeEnd,
 } from "./stream-dispatch";
+import { createBridgeCloseController } from "./bridge-close-controller";
 
 interface CollectedResponse {
   text: string;
@@ -89,6 +90,7 @@ async function collectFullResponse(
     accessToken,
     payload.requestBytes,
   );
+  const bridgeCloseController = createBridgeCloseController(bridge);
   const state: StreamState = {
     toolCallIndex: 0,
     pendingExecs: [],
@@ -128,9 +130,11 @@ async function collectFullResponse(
               });
               scheduleBridgeEnd(bridge);
             },
-            (checkpointBytes) =>
-              updateConversationCheckpoint(convKey, checkpointBytes),
-            () => scheduleBridgeEnd(bridge),
+            (checkpointBytes) => {
+              updateConversationCheckpoint(convKey, checkpointBytes);
+              bridgeCloseController.noteCheckpoint();
+            },
+            () => bridgeCloseController.noteTurnEnded(),
             (info) => {
               endStreamError = new Error(
                 `Cursor returned unsupported ${info.category}: ${info.caseName}${info.detail ? ` (${info.detail})` : ""}`,
@@ -186,6 +190,7 @@ async function collectFullResponse(
   );
 
   bridge.onClose(() => {
+    bridgeCloseController.dispose();
     clearInterval(heartbeatTimer);
     syncStoredBlobStore(convKey, payload.blobStore);
 

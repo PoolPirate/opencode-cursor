@@ -43,6 +43,7 @@ import {
   processServerMessage,
   scheduleBridgeEnd,
 } from "./stream-dispatch";
+import { createBridgeCloseController } from "./bridge-close-controller";
 
 const SSE_KEEPALIVE_INTERVAL_MS = 15_000;
 
@@ -60,6 +61,7 @@ function createBridgeStreamResponse(
   const completionId = `chatcmpl-${crypto.randomUUID().replace(/-/g, "").slice(0, 28)}`;
   const created = Math.floor(Date.now() / 1000);
   let keepaliveTimer: NodeJS.Timeout | undefined;
+  const bridgeCloseController = createBridgeCloseController(bridge);
 
   const stopKeepalive = () => {
     if (!keepaliveTimer) return;
@@ -230,9 +232,11 @@ function createBridgeStreamResponse(
                 sendDone();
                 closeController();
               },
-              (checkpointBytes) =>
-                updateConversationCheckpoint(convKey, checkpointBytes),
-              () => scheduleBridgeEnd(bridge),
+              (checkpointBytes) => {
+                updateConversationCheckpoint(convKey, checkpointBytes);
+                bridgeCloseController.noteCheckpoint();
+              },
+              () => bridgeCloseController.noteTurnEnded(),
               (info) => {
                 endStreamError = new Error(
                   `Cursor returned unsupported ${info.category}: ${info.caseName}${info.detail ? ` (${info.detail})` : ""}`,
@@ -312,6 +316,7 @@ function createBridgeStreamResponse(
           mcpExecReceived,
           hadEndStreamError: Boolean(endStreamError),
         });
+        bridgeCloseController.dispose();
         clearInterval(heartbeatTimer);
         stopKeepalive();
         syncStoredBlobStore(convKey, blobStore);
@@ -350,6 +355,7 @@ function createBridgeStreamResponse(
       });
     },
     cancel(reason) {
+      bridgeCloseController.dispose();
       stopKeepalive();
       clearInterval(heartbeatTimer);
       syncStoredBlobStore(convKey, blobStore);
