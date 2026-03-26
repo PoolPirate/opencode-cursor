@@ -1726,7 +1726,7 @@ async function testAssistantLastContinuationWithoutCheckpointFails(
   backend: TestCursorBackend,
 ) {
   console.log(
-    "[test] Testing assistant-last continuation without checkpoint...",
+    "[test] Testing assistant-last continuation failure without checkpoint...",
   );
 
   try {
@@ -1760,29 +1760,31 @@ async function testAssistantLastContinuationWithoutCheckpointFails(
       "Expected assistant-last continuation without checkpoint to fail",
     );
     const body = (await response.json()) as { error?: { message?: string } };
+    const observed = backend.getObservedRunRequests();
     assertEqual(
       body.error?.message,
-      "Assistant-last continuation requires an existing Cursor checkpoint",
+      "Assistant-last continuation is not supported by the Cursor provider",
       "Expected explicit assistant-last continuation error",
     );
-    const observed = backend.getObservedRunRequests();
     assertEqual(
       observed.length,
       0,
-      "Expected no Cursor run request when assistant-last continuation cannot be resumed",
+      "Expected no Cursor run request for unsupported assistant-last continuation",
     );
   } finally {
     modules.stopProxy();
   }
 
-  console.log("[test] Assistant-last continuation without checkpoint OK");
+  console.log(
+    "[test] Assistant-last continuation failure without checkpoint OK",
+  );
 }
 
-async function testAssistantLastContinuationUsesResumeAction(
+async function testAssistantLastContinuationWithCheckpointFails(
   modules: TestModules,
   backend: TestCursorBackend,
 ) {
-  console.log("[test] Testing assistant-last continuation resume...");
+  console.log("[test] Testing assistant-last continuation failure with checkpoint...");
 
   try {
     backend.resetObservations();
@@ -1832,28 +1834,30 @@ async function testAssistantLastContinuationUsesResumeAction(
     );
     assertEqual(
       secondResponse.status,
-      200,
-      "Expected assistant-last continuation with checkpoint to succeed",
+      400,
+      "Expected assistant-last continuation with checkpoint to fail",
     );
+    const body = (await secondResponse.json()) as {
+      error?: { message?: string };
+    };
 
     const observed = backend.getObservedRunRequests();
-    assertEqual(observed.length, 1, "Expected one observed Cursor run request");
     assertEqual(
-      observed[0]?.actionCase,
-      "resumeAction",
-      `Expected assistant-last continuation to use ResumeAction, got ${JSON.stringify(observed[0])}`,
+      body.error?.message,
+      "Assistant-last continuation is not supported by the Cursor provider",
+      "Expected explicit assistant-last continuation error even with checkpoint",
     );
     assertEqual(
-      observed[0]?.latestUserText,
-      "",
-      `Expected ResumeAction request to avoid a synthetic handoff prompt, got ${JSON.stringify(observed[0])}`,
+      observed.length,
+      0,
+      "Expected no Cursor run request when assistant-last continuation is rejected",
     );
   } finally {
     modules.stopProxy();
     backend.setRunSSEMode("close-on-append");
   }
 
-  console.log("[test] Assistant-last continuation resume OK");
+  console.log("[test] Assistant-last continuation failure with checkpoint OK");
 }
 
 async function testSystemPromptForwardedToCursorRunRequest(
@@ -2155,8 +2159,11 @@ async function main() {
     await testModelSwitchPreservesConversationState(modules, backend);
     await testProviderSwitchHistoryReconstruction(modules, backend);
     await testPlainTextProviderSwitchHandoff(modules, backend);
-    await testAssistantLastContinuationWithoutCheckpointFails(modules, backend);
-    await testAssistantLastContinuationUsesResumeAction(modules, backend);
+    await testAssistantLastContinuationWithoutCheckpointFails(
+      modules,
+      backend,
+    );
+    await testAssistantLastContinuationWithCheckpointFails(modules, backend);
     await testSystemPromptForwardedToCursorRunRequest(modules, backend);
     await testPendingToolResultResumeAcrossModelSwitch(modules, backend);
     await testUnsupportedExecFailsFast(modules, backend);

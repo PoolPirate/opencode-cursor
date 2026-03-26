@@ -22,7 +22,7 @@ import {
   normalizeAgentKey,
   resetStoredConversation,
 } from "./conversation-state";
-import { buildCursorRequest, buildCursorResumeRequest } from "./cursor-request";
+import { buildCursorRequest } from "./cursor-request";
 import {
   handleNonStreamingResponse,
   handleStreamingResponse,
@@ -163,54 +163,15 @@ export function handleChatCompletion(
   evictStaleConversations();
 
   if (assistantContinuation) {
-    if (!stored.checkpoint) {
-      return new Response(
-        JSON.stringify({
-          error: {
-            message:
-              "Assistant-last continuation requires an existing Cursor checkpoint",
-            type: "invalid_request_error",
-          },
-        }),
-        { status: 400, headers: { "Content-Type": "application/json" } },
-      );
-    }
-
-    const payload = buildCursorResumeRequest(
-      modelId,
-      systemPrompt,
-      stored.conversationId,
-      stored.checkpoint,
-      stored.blobStore,
-    );
-    payload.mcpTools = buildMcpToolDefinitions(tools);
-
-    const metadata = {
-      systemPrompt,
-      systemPromptHash,
-      completedTurnsFingerprint,
-      turns,
-      userText,
-      assistantSeedText: pendingAssistantSummary,
-      agentKey: normalizedAgentKey,
-    };
-
-    if (body.stream === false) {
-      return handleNonStreamingResponse(
-        payload,
-        accessToken,
-        modelId,
-        convKey,
-        metadata,
-      );
-    }
-    return handleStreamingResponse(
-      payload,
-      accessToken,
-      modelId,
-      bridgeKey,
-      convKey,
-      metadata,
+    return new Response(
+      JSON.stringify({
+        error: {
+          message:
+            "Assistant-last continuation is not supported by the Cursor provider",
+          type: "invalid_request_error",
+        },
+      }),
+      { status: 400, headers: { "Content-Type": "application/json" } },
     );
   }
 
