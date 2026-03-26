@@ -210,71 +210,6 @@ export function computeUsage(state: StreamState) {
   return { prompt_tokens, completion_tokens, total_tokens };
 }
 
-function getPendingExecKey(exec: PendingExec): string {
-  return exec.toolCallId || `${exec.toolName}:${exec.decodedArgs}`;
-}
-
-function replacePendingExec(state: StreamState, exec: PendingExec): void {
-  const execKey = getPendingExecKey(exec);
-  const existingIndex = state.pendingExecs.findIndex(
-    (candidate) => getPendingExecKey(candidate) === execKey,
-  );
-  if (existingIndex >= 0) {
-    state.pendingExecs[existingIndex] = exec;
-    return;
-  }
-
-  state.pendingExecs.push(exec);
-}
-
-function hasUsableDecodedArgs(decodedArgs: string): boolean {
-  const trimmed = decodedArgs.trim();
-  return trimmed !== "" && trimmed !== "{}";
-}
-
-function mergePendingExec(existing: PendingExec, incoming: PendingExec): PendingExec {
-  const incomingHasExecMetadata = incoming.execMsgId !== 0;
-  const existingHasExecMetadata = existing.execMsgId !== 0;
-
-  return {
-    execId:
-      incomingHasExecMetadata || !existing.execId ? incoming.execId : existing.execId,
-    execMsgId:
-      incomingHasExecMetadata || !existingHasExecMetadata
-        ? incoming.execMsgId
-        : existing.execMsgId,
-    toolCallId: existing.toolCallId || incoming.toolCallId,
-    toolName:
-      incoming.toolName && incoming.toolName !== "unknown_mcp_tool"
-        ? incoming.toolName
-        : existing.toolName,
-    decodedArgs: hasUsableDecodedArgs(incoming.decodedArgs)
-      ? incoming.decodedArgs
-      : existing.decodedArgs,
-  };
-}
-
-function emitPendingExec(
-  exec: PendingExec,
-  state: StreamState,
-  onMcpExec: (exec: PendingExec) => void,
-): void {
-  const execKey = getPendingExecKey(exec);
-  const existing = state.pendingExecs.find(
-    (candidate) => getPendingExecKey(candidate) === execKey,
-  );
-  const nextExec = existing ? mergePendingExec(existing, exec) : exec;
-
-  if (state.emittedToolCallIds.has(execKey)) {
-    replacePendingExec(state, nextExec);
-    return;
-  }
-
-  state.emittedToolCallIds.add(execKey);
-  replacePendingExec(state, nextExec);
-  onMcpExec(nextExec);
-}
-
 export function processServerMessage(
   msg: AgentServerMessage,
   blobStore: Map<string, Uint8Array>,
@@ -306,6 +241,7 @@ export function processServerMessage(
       msg.message.value as ExecServerMessage,
       mcpTools,
       sendFrame,
+      state,
       onMcpExec,
       onUnhandledExec,
     );
@@ -364,8 +300,8 @@ function handleInteractionUpdate(
       );
     }
   } else if (updateCase === "toolCallCompleted") {
-    const exec = decodeInteractionToolCall(update.message.value, state);
-    if (exec) emitPendingExec(exec, state, onMcpExec);
+    const callId = update.message.value?.callId;
+    if (callId) state.interactionToolArgsText.delete(callId);
   } else if (updateCase === "turnEnded") {
     onTurnEnded?.();
   } else if (
@@ -387,61 +323,10 @@ function handleInteractionUpdate(
       caseName: updateCase ?? "undefined",
     });
   }
-  // toolCallStarted, partialToolCall, toolCallDelta, and non-MCP
-  // toolCallCompleted updates are informational only. Actionable MCP tool
-  // calls may still appear here on some models, so we surface those, but we
-  // do not abort the bridge for native Cursor tool-call progress events.
-}
-
-function decodeInteractionToolCall(
-  update: {
-    callId?: string;
-    toolCall?: {
-      tool?: {
-        case?: string;
-        value?: {
-          args?: {
-            name?: string;
-            toolName?: string;
-            toolCallId?: string;
-            args?: Record<string, Uint8Array>;
-          };
-        };
-      };
-    };
-  },
-  state: StreamState,
-): PendingExec | null {
-  const callId = update.callId ?? "";
-  const toolCase = update.toolCall?.tool?.case;
-  if (toolCase !== "mcpToolCall") return null;
-
-  const mcpArgs = update.toolCall?.tool?.value?.args;
-  if (!mcpArgs) return null;
-
-  const toolCallId = mcpArgs.toolCallId || callId || crypto.randomUUID();
-
-  const decodedMap = decodeMcpArgsMap(mcpArgs.args ?? {});
-  const partialArgsText = callId
-    ? state.interactionToolArgsText.get(callId)?.trim()
-    : undefined;
-
-  let decodedArgs = "{}";
-  if (Object.keys(decodedMap).length > 0) {
-    decodedArgs = JSON.stringify(decodedMap);
-  } else if (partialArgsText) {
-    decodedArgs = partialArgsText;
-  }
-
-  if (callId) state.interactionToolArgsText.delete(callId);
-
-  return {
-    execId: callId || toolCallId,
-    execMsgId: 0,
-    toolCallId,
-    toolName: mcpArgs.toolName || mcpArgs.name || "unknown_mcp_tool",
-    decodedArgs,
-  };
+  // toolCallStarted, partialToolCall, toolCallDelta, and toolCallCompleted are
+  // informational only. Actionable MCP tool execution must come from
+  // execServerMessage.mcpArgs so tool results can be resumed with the correct
+  // exec envelope.
 }
 
 function handleInteractionQuery(
@@ -648,6 +533,7 @@ function handleExecMessage(
   execMsg: ExecServerMessage,
   mcpTools: McpToolDefinition[],
   sendFrame: (data: Uint8Array) => void,
+  state: StreamState,
   onMcpExec: (exec: PendingExec) => void,
   onUnhandledExec?: (info: UnhandledExecInfo) => void,
 ): void {
@@ -677,10 +563,15 @@ function handleExecMessage(
   if (execCase === "mcpArgs") {
     const mcpArgs = execMsg.message.value;
     const decoded = decodeMcpArgsMap(mcpArgs.args ?? {});
+    const toolCallId = mcpArgs.toolCallId || crypto.randomUUID();
+    if (state.emittedToolCallIds.has(toolCallId)) {
+      return;
+    }
+    state.emittedToolCallIds.add(toolCallId);
     onMcpExec({
       execId: execMsg.execId,
       execMsgId: execMsg.id,
-      toolCallId: mcpArgs.toolCallId || crypto.randomUUID(),
+      toolCallId,
       toolName: mcpArgs.toolName || mcpArgs.name,
       decodedArgs: JSON.stringify(decoded),
     });

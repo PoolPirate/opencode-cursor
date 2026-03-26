@@ -159,7 +159,14 @@ function createBridgeStreamResponse(
                 }
               },
               (exec) => {
-                state.pendingExecs.push(exec);
+                const existingIndex = state.pendingExecs.findIndex(
+                  (candidate) => candidate.toolCallId === exec.toolCallId,
+                );
+                if (existingIndex >= 0) {
+                  state.pendingExecs[existingIndex] = exec;
+                } else {
+                  state.pendingExecs.push(exec);
+                }
                 mcpExecReceived = true;
 
                 const flushed = tagFilter.flush();
