@@ -37,7 +37,7 @@ Install or update dependencies the way you normally do for OpenCode plugins (e.g
 
 If something fails, check that you are signed into the correct Cursor account and that your plan includes the models you expect.
 
-## Compatibiliy Notes
+## Compatibility Notes
 
 Cursor is not a raw model endpoint like the others supported in Opencode. It brings its own system prompt tools and mechanics.
 This plugin does try its best to make mcps, skills etc installed in Opencode work in Cursor.
