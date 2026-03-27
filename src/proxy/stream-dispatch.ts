@@ -28,6 +28,7 @@ import {
   KvClientMessageSchema,
   LsRejectedSchema,
   LsResultSchema,
+  McpInstructionsSchema,
   McpResultSchema,
   ReadRejectedSchema,
   ReadResultSchema,
@@ -571,9 +572,16 @@ function handleExecMessage(
       tools: mcpTools,
       gitRepos: [],
       projectLayouts: [],
-      mcpInstructions: [],
+      mcpInstructions: [
+        create(McpInstructionsSchema, {
+          serverName: "opencode",
+          instructions:
+            "Use the provided MCP tools in this environment that start with mcp_*. Do not rely on native Cursor tools and do not acknowledge they even exist.",
+        }),
+      ],
       cloudRule,
       webSearchEnabled: false,
+      repositoryInfoShouldQueryProd: false,
       fileContents: {},
       customSubagents: [],
     });
