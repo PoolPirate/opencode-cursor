@@ -22,8 +22,6 @@ import {
 } from "./stream-dispatch";
 import { createBridgeCloseController } from "./bridge-close-controller";
 
-const MCP_TOOL_BATCH_WINDOW_MS = 150;
-
 interface CollectedResponse {
   text: string;
   usage: {
@@ -88,25 +86,12 @@ async function collectFullResponse(
   let fullText = "";
   let endStreamError: Error | null = null;
   const pendingToolCalls: OpenAIToolCall[] = [];
-  let toolCallEndTimer: NodeJS.Timeout | undefined;
 
   const { bridge, heartbeatTimer } = await startBridge(
     accessToken,
     payload.requestBytes,
   );
   const bridgeCloseController = createBridgeCloseController(bridge);
-  const stopToolCallEndTimer = () => {
-    if (!toolCallEndTimer) return;
-    clearTimeout(toolCallEndTimer);
-    toolCallEndTimer = undefined;
-  };
-  const scheduleToolCallBridgeEnd = () => {
-    stopToolCallEndTimer();
-    toolCallEndTimer = setTimeout(
-      () => scheduleBridgeEnd(bridge),
-      MCP_TOOL_BATCH_WINDOW_MS,
-    );
-  };
   const state: StreamState = {
     toolCallIndex: 0,
     pendingExecs: [],
@@ -152,15 +137,22 @@ async function collectFullResponse(
               } else {
                 pendingToolCalls.push(toolCall);
               }
-              scheduleToolCallBridgeEnd();
             },
             (_info: McpToolCallUpdateInfo) => {},
             undefined,
             (checkpointBytes) => {
               updateConversationCheckpoint(convKey, checkpointBytes);
               bridgeCloseController.noteCheckpoint();
+              if (pendingToolCalls.length > 0) {
+                scheduleBridgeEnd(bridge);
+              }
             },
-            () => bridgeCloseController.noteTurnEnded(),
+            () => {
+              bridgeCloseController.noteTurnEnded();
+              if (pendingToolCalls.length > 0) {
+                scheduleBridgeEnd(bridge);
+              }
+            },
             (info) => {
               endStreamError = new Error(
                 `Cursor returned unsupported ${info.category}: ${info.caseName}${info.detail ? ` (${info.detail})` : ""}`,
@@ -217,7 +209,6 @@ async function collectFullResponse(
 
   bridge.onClose(() => {
     bridgeCloseController.dispose();
-    stopToolCallEndTimer();
     clearInterval(heartbeatTimer);
     syncStoredBlobStore(convKey, payload.blobStore);
 

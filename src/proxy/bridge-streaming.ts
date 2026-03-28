@@ -48,7 +48,6 @@ import {
 import { createBridgeCloseController } from "./bridge-close-controller";
 
 const SSE_KEEPALIVE_INTERVAL_MS = 15_000;
-const MCP_TOOL_BATCH_WINDOW_MS = 150;
 
 function sortedIds(values: Iterable<string>): string[] {
   return [...values].sort();
@@ -74,18 +73,12 @@ function createBridgeStreamResponse(
   const completionId = `chatcmpl-${crypto.randomUUID().replace(/-/g, "").slice(0, 28)}`;
   const created = Math.floor(Date.now() / 1000);
   let keepaliveTimer: NodeJS.Timeout | undefined;
-  let toolCallFlushTimer: NodeJS.Timeout | undefined;
   const bridgeCloseController = createBridgeCloseController(bridge);
 
   const stopKeepalive = () => {
     if (!keepaliveTimer) return;
     clearInterval(keepaliveTimer);
     keepaliveTimer = undefined;
-  };
-  const stopToolCallFlushTimer = () => {
-    if (!toolCallFlushTimer) return;
-    clearTimeout(toolCallFlushTimer);
-    toolCallFlushTimer = undefined;
   };
 
   const stream = new ReadableStream({
@@ -133,7 +126,6 @@ function createBridgeStreamResponse(
         if (closed) return;
         closed = true;
         stopKeepalive();
-        stopToolCallFlushTimer();
         controller.close();
       };
       const makeChunk = (
@@ -211,13 +203,14 @@ function createBridgeStreamResponse(
           }),
         );
       };
-      const publishPendingToolCalls = () => {
+      const publishPendingToolCalls = (source: "checkpoint" | "turnEnded" | "endStream") => {
         if (closed || toolCallsFlushed || state.pendingExecs.length === 0) return;
 
         logPluginInfo("Evaluating Cursor tool-call publish", {
           modelId,
           bridgeKey,
           convKey,
+          source,
           pendingExecToolCallIds: sortedIds(
             state.pendingExecs.map((exec) => exec.toolCallId),
           ),
@@ -227,7 +220,6 @@ function createBridgeStreamResponse(
         });
 
         toolCallsFlushed = true;
-        stopToolCallFlushTimer();
 
         const flushed = tagFilter.flush();
         if (flushed.reasoning)
@@ -279,6 +271,7 @@ function createBridgeStreamResponse(
           modelId,
           bridgeKey,
           convKey,
+          source,
           pendingExecToolCallIds: sortedIds(state.pendingExecs.map((exec) => exec.toolCallId)),
           emittedToolCallIds: state.pendingExecs.map((exec) => exec.toolCallId),
           assistantSeedTextLength: assistantSeedText.length,
@@ -315,23 +308,6 @@ function createBridgeStreamResponse(
         sendSSE(makeChunk({}, "tool_calls"));
         sendDone();
         closeController();
-      };
-      const schedulePendingToolCallPublish = () => {
-        if (toolCallsFlushed) return;
-        stopToolCallFlushTimer();
-        logPluginInfo("Scheduling Cursor tool-call publish", {
-          modelId,
-          bridgeKey,
-          convKey,
-          delayMs: MCP_TOOL_BATCH_WINDOW_MS,
-          pendingExecToolCallIds: sortedIds(
-            state.pendingExecs.map((exec) => exec.toolCallId),
-          ),
-        });
-        toolCallFlushTimer = setTimeout(
-          publishPendingToolCalls,
-          MCP_TOOL_BATCH_WINDOW_MS,
-        );
       };
 
       const processChunk = createConnectFrameParser(
@@ -422,8 +398,6 @@ function createBridgeStreamResponse(
                       )
                     : [],
                 });
-
-                schedulePendingToolCallPublish();
               },
               (info: McpToolCallUpdateInfo) => {
                 if (toolCallsFlushed) {
@@ -501,10 +475,36 @@ function createBridgeStreamResponse(
                 });
               },
               (checkpointBytes) => {
+                logPluginInfo("Received Cursor conversation checkpoint", {
+                  modelId,
+                  bridgeKey,
+                  convKey,
+                  toolCallsFlushed,
+                  pendingExecToolCallIds: sortedIds(
+                    state.pendingExecs.map((candidate) => candidate.toolCallId),
+                  ),
+                });
                 updateConversationCheckpoint(convKey, checkpointBytes);
                 bridgeCloseController.noteCheckpoint();
+                if (state.pendingExecs.length > 0 && !toolCallsFlushed) {
+                  publishPendingToolCalls("checkpoint");
+                }
               },
-              () => bridgeCloseController.noteTurnEnded(),
+              () => {
+                logPluginInfo("Received Cursor turn-ended signal", {
+                  modelId,
+                  bridgeKey,
+                  convKey,
+                  toolCallsFlushed,
+                  pendingExecToolCallIds: sortedIds(
+                    state.pendingExecs.map((candidate) => candidate.toolCallId),
+                  ),
+                });
+                bridgeCloseController.noteTurnEnded();
+                if (state.pendingExecs.length > 0 && !toolCallsFlushed) {
+                  publishPendingToolCalls("turnEnded");
+                }
+              },
               (info) => {
                 endStreamError = new Error(
                   `Cursor returned unsupported ${info.category}: ${info.caseName}${info.detail ? ` (${info.detail})` : ""}`,
@@ -545,6 +545,9 @@ function createBridgeStreamResponse(
             convKey,
             byteLength: endStreamBytes.length,
           });
+          if (state.pendingExecs.length > 0 && !toolCallsFlushed) {
+            publishPendingToolCalls("endStream");
+          }
           endStreamError = parseConnectEndStream(endStreamBytes);
           if (endStreamError) {
             logPluginError("Cursor stream returned Connect end-stream error", {
@@ -597,7 +600,6 @@ function createBridgeStreamResponse(
         bridgeCloseController.dispose();
         clearInterval(heartbeatTimer);
         stopKeepalive();
-        stopToolCallFlushTimer();
         syncStoredBlobStore(convKey, blobStore);
 
         if (endStreamError) {
@@ -636,7 +638,6 @@ function createBridgeStreamResponse(
     cancel(reason) {
       bridgeCloseController.dispose();
       stopKeepalive();
-      stopToolCallFlushTimer();
       clearInterval(heartbeatTimer);
       syncStoredBlobStore(convKey, blobStore);
       const active = activeBridges.get(bridgeKey);
