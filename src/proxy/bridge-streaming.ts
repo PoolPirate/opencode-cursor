@@ -458,19 +458,6 @@ function createBridgeStreamResponse(
                       existingActiveBridge.diagnostics?.lastResumeAttemptAtMs,
                   };
                 }
-                logPluginInfo("Tracking Cursor MCP interaction state in streaming bridge", {
-                  modelId,
-                  bridgeKey,
-                  convKey,
-                  updateCase: info.updateCase,
-                  toolCallId: info.toolCallId,
-                  pendingExecToolCallIds: sortedIds(
-                    state.pendingExecs.map((candidate) => candidate.toolCallId),
-                  ),
-                  hasStoredActiveBridge: Boolean(existingActiveBridge),
-                  storedActiveBridgeDiagnostics: existingActiveBridge?.diagnostics,
-                });
-
               },
               (info: StepUpdateInfo) => {
                 const existingActiveBridge = activeBridges.get(bridgeKey);
@@ -552,6 +539,12 @@ function createBridgeStreamResponse(
           }
         },
         (endStreamBytes) => {
+          logPluginInfo("Received Cursor end-of-stream signal", {
+            modelId,
+            bridgeKey,
+            convKey,
+            byteLength: endStreamBytes.length,
+          });
           endStreamError = parseConnectEndStream(endStreamBytes);
           if (endStreamError) {
             logPluginError("Cursor stream returned Connect end-stream error", {

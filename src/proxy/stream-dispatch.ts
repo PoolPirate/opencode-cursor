@@ -242,6 +242,26 @@ export function processServerMessage(
 ): void {
   const msgCase = msg.message.case;
 
+  logPluginInfo("Received Cursor server signal", {
+    messageCase: msgCase ?? "undefined",
+    interactionCase:
+      msgCase === "interactionUpdate"
+        ? msg.message.value.message?.case ?? "undefined"
+        : undefined,
+    execCase:
+      msgCase === "execServerMessage"
+        ? msg.message.value.message?.case ?? "undefined"
+        : undefined,
+    interactionQueryCase:
+      msgCase === "interactionQuery"
+        ? msg.message.value.query?.case ?? "undefined"
+        : undefined,
+    kvCase:
+      msgCase === "kvServerMessage"
+        ? msg.message.value.message?.case ?? "undefined"
+        : undefined,
+  });
+
   if (msgCase === "interactionUpdate") {
     handleInteractionUpdate(
       msg.message.value,
@@ -301,19 +321,6 @@ function handleInteractionUpdate(
   onUnsupportedMessage?: (info: UnsupportedServerMessageInfo) => void,
 ): void {
   const updateCase = update.message?.case;
-  if (
-    updateCase === "partialToolCall" ||
-    updateCase === "toolCallStarted" ||
-    updateCase === "toolCallCompleted" ||
-    updateCase === "turnEnded"
-  ) {
-    logPluginInfo("Received Cursor interaction update", {
-      updateCase: updateCase ?? "undefined",
-      callId: update.message?.value?.callId,
-      modelCallId: update.message?.value?.modelCallId,
-      toolCase: update.message?.value?.toolCall?.tool?.case,
-      });
-  }
 
   if (
     (updateCase === "partialToolCall" ||
@@ -607,11 +614,6 @@ function handleExecMessage(
   onUnhandledExec?: (info: UnhandledExecInfo) => void,
 ): void {
   const execCase = execMsg.message.case;
-  logPluginInfo("Received Cursor exec message", {
-    execCase: execCase ?? "undefined",
-    execId: execMsg.execId,
-    execMsgId: execMsg.id,
-  });
 
   if (execCase === "requestContextArgs") {
     logPluginInfo("Responding to Cursor requestContextArgs", {
