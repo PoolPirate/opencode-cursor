@@ -155,6 +155,7 @@ async function collectFullResponse(
               scheduleToolCallBridgeEnd();
             },
             (_info: McpToolCallUpdateInfo) => {},
+            undefined,
             (checkpointBytes) => {
               updateConversationCheckpoint(convKey, checkpointBytes);
               bridgeCloseController.noteCheckpoint();

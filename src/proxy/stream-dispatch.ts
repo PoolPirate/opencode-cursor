@@ -83,6 +83,12 @@ export interface McpToolCallUpdateInfo {
   toolName?: string;
 }
 
+export interface StepUpdateInfo {
+  updateCase: "stepStarted" | "stepCompleted";
+  stepId: string;
+  stepDurationMs?: string;
+}
+
 export function parseConnectEndStream(data: Uint8Array): Error | null {
   try {
     const payload = JSON.parse(new TextDecoder().decode(data));
@@ -228,6 +234,7 @@ export function processServerMessage(
   onText: (text: string, isThinking?: boolean) => void,
   onMcpExec: (exec: PendingExec) => void,
   onMcpToolCallUpdate?: (info: McpToolCallUpdateInfo) => void,
+  onStepUpdate?: (info: StepUpdateInfo) => void,
   onCheckpoint?: (checkpointBytes: Uint8Array) => void,
   onTurnEnded?: () => void,
   onUnsupportedMessage?: (info: UnsupportedServerMessageInfo) => void,
@@ -241,6 +248,7 @@ export function processServerMessage(
       state,
       onText,
       onMcpToolCallUpdate,
+      onStepUpdate,
       onTurnEnded,
       onUnsupportedMessage,
     );
@@ -288,6 +296,7 @@ function handleInteractionUpdate(
   state: StreamState,
   onText: (text: string, isThinking?: boolean) => void,
   onMcpToolCallUpdate?: (info: McpToolCallUpdateInfo) => void,
+  onStepUpdate?: (info: StepUpdateInfo) => void,
   onTurnEnded?: () => void,
   onUnsupportedMessage?: (info: UnsupportedServerMessageInfo) => void,
 ): void {
@@ -321,6 +330,21 @@ function handleInteractionUpdate(
         toolCallId,
         modelCallId: toolValue.modelCallId,
         toolName: toolArgs?.toolName || toolArgs?.name,
+      });
+    }
+  }
+
+  if (updateCase === "stepStarted" || updateCase === "stepCompleted") {
+    const stepValue = update.message?.value;
+    const stepId = stepValue?.stepId;
+    if (stepId !== undefined && stepId !== null) {
+      onStepUpdate?.({
+        updateCase,
+        stepId: String(stepId),
+        stepDurationMs:
+          updateCase === "stepCompleted" && stepValue?.stepDurationMs !== undefined
+            ? String(stepValue.stepDurationMs)
+            : undefined,
       });
     }
   }

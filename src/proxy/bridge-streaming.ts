@@ -40,6 +40,7 @@ import {
   createConnectFrameParser,
   createThinkingTagFilter,
   type McpToolCallUpdateInfo,
+  type StepUpdateInfo,
   parseConnectEndStream,
   processServerMessage,
   scheduleBridgeEnd,
@@ -470,6 +471,47 @@ function createBridgeStreamResponse(
                   storedActiveBridgeDiagnostics: existingActiveBridge?.diagnostics,
                 });
 
+              },
+              (info: StepUpdateInfo) => {
+                const existingActiveBridge = activeBridges.get(bridgeKey);
+                if (existingActiveBridge) {
+                  existingActiveBridge.diagnostics = {
+                    announcedToolCallIds:
+                      existingActiveBridge.diagnostics?.announcedToolCallIds ?? [],
+                    publishedToolCallIds:
+                      existingActiveBridge.diagnostics?.publishedToolCallIds ?? [],
+                    lastMcpUpdate:
+                      info.updateCase === "stepCompleted"
+                        ? `${info.updateCase}:${info.stepId}:${info.stepDurationMs ?? "unknown"}`
+                        : `${info.updateCase}:${info.stepId}`,
+                    publishedAtMs: existingActiveBridge.diagnostics?.publishedAtMs,
+                    lastResumeAttemptAtMs:
+                      existingActiveBridge.diagnostics?.lastResumeAttemptAtMs,
+                  };
+                }
+                logPluginInfo("Tracking Cursor step boundary in streaming bridge", {
+                  modelId,
+                  bridgeKey,
+                  convKey,
+                  updateCase: info.updateCase,
+                  stepId: info.stepId,
+                  stepDurationMs: info.stepDurationMs,
+                  toolCallsFlushed,
+                  mcpExecReceived,
+                  pendingExecToolCallIds: sortedIds(
+                    state.pendingExecs.map((candidate) => candidate.toolCallId),
+                  ),
+                  streamedToolCallIds: sortedIds(streamedToolCalls.keys()),
+                  hasStoredActiveBridge: Boolean(existingActiveBridge),
+                  storedActiveBridgePendingExecToolCallIds: existingActiveBridge
+                    ? sortedIds(
+                        existingActiveBridge.pendingExecs.map(
+                          (candidate) => candidate.toolCallId,
+                        ),
+                      )
+                    : [],
+                  storedActiveBridgeDiagnostics: existingActiveBridge?.diagnostics,
+                });
               },
               (checkpointBytes) => {
                 updateConversationCheckpoint(convKey, checkpointBytes);
