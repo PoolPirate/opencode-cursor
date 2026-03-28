@@ -48,10 +48,15 @@ import { createBridgeCloseController } from "./bridge-close-controller";
 
 const SSE_KEEPALIVE_INTERVAL_MS = 15_000;
 const MCP_TOOL_BATCH_WINDOW_MS = 150;
-const MCP_TOOL_METADATA_GRACE_MS = 1_500;
 
 function sortedIds(values: Iterable<string>): string[] {
   return [...values].sort();
+}
+
+interface StreamedToolCallState {
+  index: number;
+  toolName: string;
+  started: boolean;
 }
 
 function createBridgeStreamResponse(
@@ -97,8 +102,7 @@ function createBridgeStreamResponse(
       let mcpExecReceived = false;
       let endStreamError: Error | null = null;
       let toolCallsFlushed = false;
-      const announcedToolCallIds = new Set<string>();
-      let toolCallMetadataDeadlineMs = 0;
+      const streamedToolCalls = new Map<string, StreamedToolCallState>();
 
       const sendSSE = (data: object) => {
         if (closed) return;
@@ -153,71 +157,76 @@ function createBridgeStreamResponse(
           usage: { prompt_tokens, completion_tokens, total_tokens },
         };
       };
-      const getMissingAnnouncedToolCallIds = () => {
-        const pendingExecIds = new Set(
-          state.pendingExecs.map((exec) => exec.toolCallId),
-        );
-        return [...announcedToolCallIds].filter(
-          (toolCallId) => !pendingExecIds.has(toolCallId),
+      const ensureStreamedToolCall = (toolCallId: string, toolName: string) => {
+        const existing = streamedToolCalls.get(toolCallId);
+        if (existing) {
+          if (toolName && existing.toolName !== toolName) {
+            existing.toolName = toolName;
+          }
+          return existing;
+        }
+
+        const createdState: StreamedToolCallState = {
+          index: state.toolCallIndex++,
+          toolName,
+          started: false,
+        };
+        streamedToolCalls.set(toolCallId, createdState);
+        return createdState;
+      };
+      const emitPendingToolStart = (
+        toolCallId: string,
+        toolName: string,
+        source: "interaction" | "exec" | "publish",
+      ) => {
+        if (!toolName) return;
+
+        const toolCall = ensureStreamedToolCall(toolCallId, toolName);
+        if (toolCall.started) return;
+
+        toolCall.started = true;
+        logPluginInfo("Streaming pending Cursor tool-call start", {
+          modelId,
+          bridgeKey,
+          convKey,
+          toolCallId,
+          toolName,
+          index: toolCall.index,
+          source,
+        });
+        sendSSE(
+          makeChunk({
+            tool_calls: [
+              {
+                index: toolCall.index,
+                id: toolCallId,
+                type: "function",
+                function: {
+                  name: toolCall.toolName,
+                  arguments: "",
+                },
+              },
+            ],
+          }),
         );
       };
       const publishPendingToolCalls = () => {
         if (closed || toolCallsFlushed || state.pendingExecs.length === 0) return;
 
-        const missingAnnouncedToolCallIds = getMissingAnnouncedToolCallIds();
         logPluginInfo("Evaluating Cursor tool-call publish", {
           modelId,
           bridgeKey,
           convKey,
-          announcedToolCallIds: sortedIds(announcedToolCallIds),
           pendingExecToolCallIds: sortedIds(
             state.pendingExecs.map((exec) => exec.toolCallId),
           ),
-          missingAnnouncedToolCallIds,
           toolCallsFlushed,
           mcpExecReceived,
-          toolCallMetadataDeadlineMs,
           nowMs: Date.now(),
         });
-        if (
-          missingAnnouncedToolCallIds.length > 0 &&
-          Date.now() < toolCallMetadataDeadlineMs
-        ) {
-          logPluginInfo("Deferring Cursor tool-call publish until more MCP exec metadata arrives", {
-            modelId,
-            bridgeKey,
-            convKey,
-            missingAnnouncedToolCallIds,
-            waitMs: toolCallMetadataDeadlineMs - Date.now(),
-          });
-          schedulePendingToolCallPublish();
-          return;
-        }
 
         toolCallsFlushed = true;
         stopToolCallFlushTimer();
-
-        if (missingAnnouncedToolCallIds.length > 0) {
-          logPluginError(
-            "Aborting Cursor stream because announced MCP tool calls never received exec metadata",
-            {
-              modelId,
-              bridgeKey,
-              convKey,
-              pendingExecToolCallIds: state.pendingExecs.map(
-                (exec) => exec.toolCallId,
-              ),
-              missingAnnouncedToolCallIds,
-            },
-          );
-          clearInterval(heartbeatTimer);
-          bridge.end();
-          failStream(
-            `Cursor announced MCP tool calls without matching exec metadata: ${missingAnnouncedToolCallIds.join(", ")}`,
-            "cursor_mcp_tool_mismatch",
-          );
-          return;
-        }
 
         const flushed = tagFilter.flush();
         if (flushed.reasoning)
@@ -227,35 +236,23 @@ function createBridgeStreamResponse(
           sendSSE(makeChunk({ content: flushed.content }));
         }
 
-        const toolCalls = state.pendingExecs.map((exec) => ({
-          index: state.toolCallIndex++,
-          id: exec.toolCallId,
-          type: "function" as const,
-          function: {
-            name: exec.toolName,
-            arguments: exec.decodedArgs,
-          },
-        }));
         const assistantSeedText = [
           assistantText.trim(),
-          toolCalls.map(formatToolCallSummary).join("\n\n"),
+          state.pendingExecs
+            .map((exec) =>
+              formatToolCallSummary({
+                id: exec.toolCallId,
+                type: "function",
+                function: {
+                  name: exec.toolName,
+                  arguments: exec.decodedArgs,
+                },
+              }),
+            )
+            .join("\n\n"),
         ]
           .filter(Boolean)
           .join("\n\n");
-
-        logPluginInfo("Publishing Cursor tool-call envelope", {
-          modelId,
-          bridgeKey,
-          convKey,
-          announcedToolCallIds: sortedIds(announcedToolCallIds),
-          pendingExecToolCallIds: sortedIds(
-            state.pendingExecs.map((exec) => exec.toolCallId),
-          ),
-          emittedToolCallIds: toolCalls.map((call) => call.id),
-          assistantSeedTextLength: assistantSeedText.length,
-        });
-
-        sendSSE(makeChunk({ tool_calls: toolCalls }));
 
         activeBridges.set(bridgeKey, {
           bridge,
@@ -263,28 +260,55 @@ function createBridgeStreamResponse(
           blobStore,
           cloudRule,
           mcpTools,
-          pendingExecs: state.pendingExecs,
+          pendingExecs: [...state.pendingExecs],
           modelId,
           metadata: {
             ...metadata,
             assistantSeedText,
           },
           diagnostics: {
-            announcedToolCallIds: sortedIds(announcedToolCallIds),
-            publishedToolCallIds: toolCalls.map((call) => call.id),
+            announcedToolCallIds: [],
+            publishedToolCallIds: state.pendingExecs.map((exec) => exec.toolCallId),
             lastMcpUpdate: "publish",
             publishedAtMs: Date.now(),
           },
         });
+
+        logPluginInfo("Publishing Cursor tool-call envelope", {
+          modelId,
+          bridgeKey,
+          convKey,
+          pendingExecToolCallIds: sortedIds(state.pendingExecs.map((exec) => exec.toolCallId)),
+          emittedToolCallIds: state.pendingExecs.map((exec) => exec.toolCallId),
+          assistantSeedTextLength: assistantSeedText.length,
+        });
+
+        for (const exec of state.pendingExecs) {
+          emitPendingToolStart(exec.toolCallId, exec.toolName, "publish");
+          const streamedToolCall = ensureStreamedToolCall(
+            exec.toolCallId,
+            exec.toolName,
+          );
+          sendSSE(
+            makeChunk({
+              tool_calls: [
+                {
+                  index: streamedToolCall.index,
+                  function: {
+                    arguments: exec.decodedArgs,
+                  },
+                },
+              ],
+            }),
+          );
+        }
 
         logPluginInfo("Stored active Cursor bridge for tool-result resume", {
           modelId,
           bridgeKey,
           convKey,
           diagnostics: activeBridges.get(bridgeKey)?.diagnostics,
-          pendingExecToolCallIds: sortedIds(
-            state.pendingExecs.map((exec) => exec.toolCallId),
-          ),
+          pendingExecToolCallIds: sortedIds(state.pendingExecs.map((exec) => exec.toolCallId)),
         });
 
         sendSSE(makeChunk({}, "tool_calls"));
@@ -299,11 +323,9 @@ function createBridgeStreamResponse(
           bridgeKey,
           convKey,
           delayMs: MCP_TOOL_BATCH_WINDOW_MS,
-          announcedToolCallIds: sortedIds(announcedToolCallIds),
           pendingExecToolCallIds: sortedIds(
             state.pendingExecs.map((exec) => exec.toolCallId),
           ),
-          toolCallMetadataDeadlineMs,
         });
         toolCallFlushTimer = setTimeout(
           publishPendingToolCalls,
@@ -340,10 +362,22 @@ function createBridgeStreamResponse(
                 }
               },
               (exec) => {
+                if (toolCallsFlushed) {
+                  logPluginWarn("Received Cursor MCP exec after tool-call envelope was already published", {
+                    modelId,
+                    bridgeKey,
+                    convKey,
+                    toolCallId: exec.toolCallId,
+                    toolName: exec.toolName,
+                    publishedToolCallIds:
+                      activeBridges.get(bridgeKey)?.diagnostics?.publishedToolCallIds ??
+                      [],
+                  });
+                }
+                emitPendingToolStart(exec.toolCallId, exec.toolName, "exec");
                 const pendingBefore = sortedIds(
                   state.pendingExecs.map((candidate) => candidate.toolCallId),
                 );
-                announcedToolCallIds.add(exec.toolCallId);
                 const existingIndex = state.pendingExecs.findIndex(
                   (candidate) => candidate.toolCallId === exec.toolCallId,
                 );
@@ -353,8 +387,6 @@ function createBridgeStreamResponse(
                   state.pendingExecs.push(exec);
                 }
                 mcpExecReceived = true;
-                toolCallMetadataDeadlineMs =
-                  Date.now() + MCP_TOOL_METADATA_GRACE_MS;
 
                 const pendingAfter = sortedIds(
                   state.pendingExecs.map((candidate) => candidate.toolCallId),
@@ -362,7 +394,8 @@ function createBridgeStreamResponse(
                 const existingActiveBridge = activeBridges.get(bridgeKey);
                 if (existingActiveBridge) {
                   existingActiveBridge.diagnostics = {
-                    announcedToolCallIds: sortedIds(announcedToolCallIds),
+                    announcedToolCallIds:
+                      existingActiveBridge.diagnostics?.announcedToolCallIds ?? [],
                     publishedToolCallIds:
                       existingActiveBridge.diagnostics?.publishedToolCallIds ?? [],
                     lastMcpUpdate: `exec:${exec.toolCallId}`,
@@ -379,7 +412,6 @@ function createBridgeStreamResponse(
                   toolName: exec.toolName,
                   pendingBefore,
                   pendingAfter,
-                  announcedToolCallIds: sortedIds(announcedToolCallIds),
                   hasStoredActiveBridge: Boolean(existingActiveBridge),
                   storedActiveBridgePendingExecToolCallIds: existingActiveBridge
                     ? sortedIds(
@@ -393,17 +425,30 @@ function createBridgeStreamResponse(
                 schedulePendingToolCallPublish();
               },
               (info: McpToolCallUpdateInfo) => {
-                const announcedBefore = sortedIds(announcedToolCallIds);
-                if (info.updateCase === "toolCallCompleted") {
-                  announcedToolCallIds.delete(info.toolCallId);
-                } else {
-                  announcedToolCallIds.add(info.toolCallId);
+                if (toolCallsFlushed) {
+                  logPluginWarn("Received Cursor MCP interaction update after tool-call envelope was already published", {
+                    modelId,
+                    bridgeKey,
+                    convKey,
+                    updateCase: info.updateCase,
+                    toolCallId: info.toolCallId,
+                    publishedToolCallIds:
+                      activeBridges.get(bridgeKey)?.diagnostics?.publishedToolCallIds ??
+                      [],
+                  });
                 }
-
+                if (info.updateCase !== "toolCallCompleted") {
+                  emitPendingToolStart(
+                    info.toolCallId,
+                    info.toolName ?? "",
+                    "interaction",
+                  );
+                }
                 const existingActiveBridge = activeBridges.get(bridgeKey);
                 if (existingActiveBridge) {
                   existingActiveBridge.diagnostics = {
-                    announcedToolCallIds: sortedIds(announcedToolCallIds),
+                    announcedToolCallIds:
+                      existingActiveBridge.diagnostics?.announcedToolCallIds ?? [],
                     publishedToolCallIds:
                       existingActiveBridge.diagnostics?.publishedToolCallIds ?? [],
                     lastMcpUpdate: `${info.updateCase}:${info.toolCallId}`,
@@ -418,8 +463,6 @@ function createBridgeStreamResponse(
                   convKey,
                   updateCase: info.updateCase,
                   toolCallId: info.toolCallId,
-                  announcedBefore,
-                  announcedAfter: sortedIds(announcedToolCallIds),
                   pendingExecToolCallIds: sortedIds(
                     state.pendingExecs.map((candidate) => candidate.toolCallId),
                   ),
@@ -427,9 +470,6 @@ function createBridgeStreamResponse(
                   storedActiveBridgeDiagnostics: existingActiveBridge?.diagnostics,
                 });
 
-                if (mcpExecReceived) {
-                  schedulePendingToolCallPublish();
-                }
               },
               (checkpointBytes) => {
                 updateConversationCheckpoint(convKey, checkpointBytes);
@@ -514,7 +554,6 @@ function createBridgeStreamResponse(
           code,
           mcpExecReceived,
           hadEndStreamError: Boolean(endStreamError),
-          announcedToolCallIds: sortedIds(announcedToolCallIds),
           pendingExecToolCallIds: sortedIds(
             state.pendingExecs.map((exec) => exec.toolCallId),
           ),
