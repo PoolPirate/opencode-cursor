@@ -39,6 +39,7 @@ import {
   computeUsage,
   createConnectFrameParser,
   createThinkingTagFilter,
+  type McpToolCallUpdateInfo,
   parseConnectEndStream,
   processServerMessage,
   scheduleBridgeEnd,
@@ -46,7 +47,8 @@ import {
 import { createBridgeCloseController } from "./bridge-close-controller";
 
 const SSE_KEEPALIVE_INTERVAL_MS = 15_000;
-const MCP_TOOL_BATCH_WINDOW_MS = 75;
+const MCP_TOOL_BATCH_WINDOW_MS = 150;
+const MCP_TOOL_METADATA_GRACE_MS = 1_500;
 
 function createBridgeStreamResponse(
   bridge: CursorSession,
@@ -91,6 +93,8 @@ function createBridgeStreamResponse(
       let mcpExecReceived = false;
       let endStreamError: Error | null = null;
       let toolCallsFlushed = false;
+      const announcedToolCallIds = new Set<string>();
+      let toolCallMetadataDeadlineMs = 0;
 
       const sendSSE = (data: object) => {
         if (closed) return;
@@ -145,11 +149,50 @@ function createBridgeStreamResponse(
           usage: { prompt_tokens, completion_tokens, total_tokens },
         };
       };
+      const getMissingAnnouncedToolCallIds = () => {
+        const pendingExecIds = new Set(
+          state.pendingExecs.map((exec) => exec.toolCallId),
+        );
+        return [...announcedToolCallIds].filter(
+          (toolCallId) => !pendingExecIds.has(toolCallId),
+        );
+      };
       const publishPendingToolCalls = () => {
         if (closed || toolCallsFlushed || state.pendingExecs.length === 0) return;
 
+        const missingAnnouncedToolCallIds = getMissingAnnouncedToolCallIds();
+        if (
+          missingAnnouncedToolCallIds.length > 0 &&
+          Date.now() < toolCallMetadataDeadlineMs
+        ) {
+          schedulePendingToolCallPublish();
+          return;
+        }
+
         toolCallsFlushed = true;
         stopToolCallFlushTimer();
+
+        if (missingAnnouncedToolCallIds.length > 0) {
+          logPluginError(
+            "Aborting Cursor stream because announced MCP tool calls never received exec metadata",
+            {
+              modelId,
+              bridgeKey,
+              convKey,
+              pendingExecToolCallIds: state.pendingExecs.map(
+                (exec) => exec.toolCallId,
+              ),
+              missingAnnouncedToolCallIds,
+            },
+          );
+          clearInterval(heartbeatTimer);
+          bridge.end();
+          failStream(
+            `Cursor announced MCP tool calls without matching exec metadata: ${missingAnnouncedToolCallIds.join(", ")}`,
+            "cursor_mcp_tool_mismatch",
+          );
+          return;
+        }
 
         const flushed = tagFilter.flush();
         if (flushed.reasoning)
@@ -183,7 +226,7 @@ function createBridgeStreamResponse(
           blobStore,
           cloudRule,
           mcpTools,
-          pendingExecs: [...state.pendingExecs],
+          pendingExecs: state.pendingExecs,
           modelId,
           metadata: {
             ...metadata,
@@ -233,6 +276,7 @@ function createBridgeStreamResponse(
                 }
               },
               (exec) => {
+                announcedToolCallIds.add(exec.toolCallId);
                 const existingIndex = state.pendingExecs.findIndex(
                   (candidate) => candidate.toolCallId === exec.toolCallId,
                 );
@@ -242,8 +286,21 @@ function createBridgeStreamResponse(
                   state.pendingExecs.push(exec);
                 }
                 mcpExecReceived = true;
+                toolCallMetadataDeadlineMs =
+                  Date.now() + MCP_TOOL_METADATA_GRACE_MS;
 
                 schedulePendingToolCallPublish();
+              },
+              (info: McpToolCallUpdateInfo) => {
+                if (info.updateCase === "toolCallCompleted") {
+                  announcedToolCallIds.delete(info.toolCallId);
+                } else {
+                  announcedToolCallIds.add(info.toolCallId);
+                }
+
+                if (mcpExecReceived) {
+                  schedulePendingToolCallPublish();
+                }
               },
               (checkpointBytes) => {
                 updateConversationCheckpoint(convKey, checkpointBytes);
@@ -479,7 +536,14 @@ export async function handleToolResultResume(
       .filter(Boolean)
       .join("\n\n"),
   };
+  const pendingToolCallIds = new Set(pendingExecs.map((exec) => exec.toolCallId));
   const toolResultIds = new Set(toolResults.map((result) => result.toolCallId));
+  const missingToolResultIds = pendingExecs
+    .map((exec) => exec.toolCallId)
+    .filter((toolCallId) => !toolResultIds.has(toolCallId));
+  const unexpectedToolResultIds = toolResults
+    .map((result) => result.toolCallId)
+    .filter((toolCallId) => !pendingToolCallIds.has(toolCallId));
   const matchedPendingExecs = pendingExecs.filter((exec) =>
     toolResultIds.has(exec.toolCallId),
   );
@@ -513,6 +577,35 @@ export async function handleToolResultResume(
             "Cursor requested a tool call but never provided resumable exec metadata. Aborting instead of retrying with synthetic ids.",
           type: "invalid_request_error",
           code: "cursor_missing_exec_metadata",
+        },
+      }),
+      { status: 400, headers: { "Content-Type": "application/json" } },
+    );
+  }
+
+  if (missingToolResultIds.length > 0 || unexpectedToolResultIds.length > 0) {
+    logPluginError("Aborting Cursor tool-result resume because tool-call ids did not match", {
+      bridgeKey,
+      convKey,
+      modelId,
+      pendingToolCallIds: [...pendingToolCallIds],
+      toolResultIds: [...toolResultIds],
+      missingToolResultIds,
+      unexpectedToolResultIds,
+    });
+    clearInterval(heartbeatTimer);
+    bridge.end();
+    return new Response(
+      JSON.stringify({
+        error: {
+          message:
+            "Tool-result ids did not match the active Cursor MCP tool calls. Aborting instead of resuming a potentially stuck session.",
+          type: "invalid_request_error",
+          code: "cursor_tool_result_mismatch",
+          details: {
+            missingToolResultIds,
+            unexpectedToolResultIds,
+          },
         },
       }),
       { status: 400, headers: { "Content-Type": "application/json" } },

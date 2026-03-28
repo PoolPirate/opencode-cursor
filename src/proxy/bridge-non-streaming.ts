@@ -15,13 +15,15 @@ import {
   computeUsage,
   createConnectFrameParser,
   createThinkingTagFilter,
+  type McpToolCallUpdateInfo,
   parseConnectEndStream,
   processServerMessage,
   scheduleBridgeEnd,
 } from "./stream-dispatch";
 import { createBridgeCloseController } from "./bridge-close-controller";
 
-const MCP_TOOL_BATCH_WINDOW_MS = 75;
+const MCP_TOOL_BATCH_WINDOW_MS = 150;
+const MCP_TOOL_METADATA_GRACE_MS = 1_500;
 
 interface CollectedResponse {
   text: string;
@@ -88,6 +90,8 @@ async function collectFullResponse(
   let endStreamError: Error | null = null;
   const pendingToolCalls: OpenAIToolCall[] = [];
   let toolCallEndTimer: NodeJS.Timeout | undefined;
+  const announcedToolCallIds = new Set<string>();
+  let toolCallMetadataDeadlineMs = 0;
 
   const { bridge, heartbeatTimer } = await startBridge(
     accessToken,
@@ -99,10 +103,44 @@ async function collectFullResponse(
     clearTimeout(toolCallEndTimer);
     toolCallEndTimer = undefined;
   };
+  const getMissingAnnouncedToolCallIds = () => {
+    const pendingExecIds = new Set(pendingToolCalls.map((call) => call.id));
+    return [...announcedToolCallIds].filter(
+      (toolCallId) => !pendingExecIds.has(toolCallId),
+    );
+  };
   const scheduleToolCallBridgeEnd = () => {
     stopToolCallEndTimer();
     toolCallEndTimer = setTimeout(
-      () => scheduleBridgeEnd(bridge),
+      () => {
+        const missingAnnouncedToolCallIds = getMissingAnnouncedToolCallIds();
+        if (
+          missingAnnouncedToolCallIds.length > 0 &&
+          Date.now() < toolCallMetadataDeadlineMs
+        ) {
+          scheduleToolCallBridgeEnd();
+          return;
+        }
+
+        if (missingAnnouncedToolCallIds.length > 0) {
+          endStreamError = new Error(
+            `Cursor announced MCP tool calls without matching exec metadata: ${missingAnnouncedToolCallIds.join(", ")}`,
+          );
+          logPluginError(
+            "Aborting non-streaming Cursor response because announced MCP tool calls never received exec metadata",
+            {
+              modelId,
+              convKey,
+              pendingExecToolCallIds: pendingToolCalls.map((call) => call.id),
+              missingAnnouncedToolCallIds,
+            },
+          );
+          scheduleBridgeEnd(bridge);
+          return;
+        }
+
+        scheduleBridgeEnd(bridge);
+      },
       MCP_TOOL_BATCH_WINDOW_MS,
     );
   };
@@ -135,6 +173,7 @@ async function collectFullResponse(
               fullText += content;
             },
             (exec) => {
+              announcedToolCallIds.add(exec.toolCallId);
               const toolCall = {
                 id: exec.toolCallId,
                 type: "function" as const,
@@ -151,7 +190,20 @@ async function collectFullResponse(
               } else {
                 pendingToolCalls.push(toolCall);
               }
+              toolCallMetadataDeadlineMs =
+                Date.now() + MCP_TOOL_METADATA_GRACE_MS;
               scheduleToolCallBridgeEnd();
+            },
+            (info: McpToolCallUpdateInfo) => {
+              if (info.updateCase === "toolCallCompleted") {
+                announcedToolCallIds.delete(info.toolCallId);
+              } else {
+                announcedToolCallIds.add(info.toolCallId);
+              }
+
+              if (pendingToolCalls.length > 0) {
+                scheduleToolCallBridgeEnd();
+              }
             },
             (checkpointBytes) => {
               updateConversationCheckpoint(convKey, checkpointBytes);

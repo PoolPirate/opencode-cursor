@@ -76,6 +76,13 @@ export interface UnsupportedServerMessageInfo {
   detail?: string;
 }
 
+export interface McpToolCallUpdateInfo {
+  updateCase: "partialToolCall" | "toolCallStarted" | "toolCallCompleted";
+  toolCallId: string;
+  modelCallId?: string;
+  toolName?: string;
+}
+
 export function parseConnectEndStream(data: Uint8Array): Error | null {
   try {
     const payload = JSON.parse(new TextDecoder().decode(data));
@@ -220,6 +227,7 @@ export function processServerMessage(
   state: StreamState,
   onText: (text: string, isThinking?: boolean) => void,
   onMcpExec: (exec: PendingExec) => void,
+  onMcpToolCallUpdate?: (info: McpToolCallUpdateInfo) => void,
   onCheckpoint?: (checkpointBytes: Uint8Array) => void,
   onTurnEnded?: () => void,
   onUnsupportedMessage?: (info: UnsupportedServerMessageInfo) => void,
@@ -232,6 +240,7 @@ export function processServerMessage(
       msg.message.value,
       state,
       onText,
+      onMcpToolCallUpdate,
       onTurnEnded,
       onUnsupportedMessage,
     );
@@ -278,6 +287,7 @@ function handleInteractionUpdate(
   update: any,
   state: StreamState,
   onText: (text: string, isThinking?: boolean) => void,
+  onMcpToolCallUpdate?: (info: McpToolCallUpdateInfo) => void,
   onTurnEnded?: () => void,
   onUnsupportedMessage?: (info: UnsupportedServerMessageInfo) => void,
 ): void {
@@ -293,7 +303,26 @@ function handleInteractionUpdate(
       callId: update.message?.value?.callId,
       modelCallId: update.message?.value?.modelCallId,
       toolCase: update.message?.value?.toolCall?.tool?.case,
-    });
+      });
+  }
+
+  if (
+    (updateCase === "partialToolCall" ||
+      updateCase === "toolCallStarted" ||
+      updateCase === "toolCallCompleted") &&
+    update.message?.value?.toolCall?.tool?.case === "mcpToolCall"
+  ) {
+    const toolValue = update.message.value;
+    const toolArgs = toolValue?.toolCall?.tool?.value?.args;
+    const toolCallId = toolArgs?.toolCallId || toolValue.callId;
+    if (toolCallId) {
+      onMcpToolCallUpdate?.({
+        updateCase,
+        toolCallId,
+        modelCallId: toolValue.modelCallId,
+        toolName: toolArgs?.toolName || toolArgs?.name,
+      });
+    }
   }
 
   if (updateCase === "textDelta") {
