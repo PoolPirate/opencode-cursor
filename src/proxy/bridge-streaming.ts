@@ -150,6 +150,15 @@ function createBridgeStreamResponse(
           usage: { prompt_tokens, completion_tokens, total_tokens },
         };
       };
+      let lastUsageChunkKey = "";
+      const sendUsageChunkIfChanged = () => {
+        const usageChunk = makeUsageChunk();
+        const usageKey = JSON.stringify(usageChunk.usage);
+        if (usageKey === lastUsageChunkKey) return;
+
+        lastUsageChunkKey = usageKey;
+        sendSSE(usageChunk);
+      };
       const ensureStreamedToolCall = (toolCallId: string, toolName: string) => {
         const existing = streamedToolCalls.get(toolCallId);
         if (existing) {
@@ -305,6 +314,7 @@ function createBridgeStreamResponse(
           pendingExecToolCallIds: sortedIds(state.pendingExecs.map((exec) => exec.toolCallId)),
         });
 
+        sendUsageChunkIfChanged();
         sendSSE(makeChunk({}, "tool_calls"));
         sendDone();
         closeController();
@@ -485,6 +495,7 @@ function createBridgeStreamResponse(
                   ),
                 });
                 updateConversationCheckpoint(convKey, checkpointBytes);
+                sendUsageChunkIfChanged();
                 bridgeCloseController.noteCheckpoint();
                 if (state.pendingExecs.length > 0 && !toolCallsFlushed) {
                   publishPendingToolCalls("checkpoint");
@@ -623,7 +634,7 @@ function createBridgeStreamResponse(
             assistantText,
           );
           sendSSE(makeChunk({}, "stop"));
-          sendSSE(makeUsageChunk());
+          sendUsageChunkIfChanged();
           sendDone();
           closeController();
           return;
