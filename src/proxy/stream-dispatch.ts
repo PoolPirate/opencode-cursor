@@ -218,8 +218,14 @@ export function createThinkingTagFilter(): {
 }
 
 export function computeUsage(state: StreamState) {
+  if (!state.checkpointSeen) {
+    throw new Error(
+      "Cannot report Cursor usage without checkpoint token details.",
+    );
+  }
+
   const completion_tokens = state.outputTokens;
-  const total_tokens = state.totalTokens || completion_tokens;
+  const total_tokens = state.totalTokens;
   const prompt_tokens = Math.max(0, total_tokens - completion_tokens);
   return { prompt_tokens, completion_tokens, total_tokens };
 }
@@ -298,6 +304,7 @@ export function processServerMessage(
   } else if (msgCase === "conversationCheckpointUpdate") {
     const stateStructure = msg.message.value as ConversationStateStructure;
     if (stateStructure.tokenDetails) {
+      state.checkpointSeen = true;
       state.totalTokens = stateStructure.tokenDetails.usedTokens;
     }
     if (onCheckpoint) {

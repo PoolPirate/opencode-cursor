@@ -1,16 +1,24 @@
 import type { CursorSession } from "../cursor/bidi-session";
 import { scheduleBridgeEnd } from "./stream-dispatch";
 
-const TURN_END_GRACE_MS = 750;
+const CHECKPOINT_WAIT_AFTER_TURN_END_MS = 2_000;
 
-export function createBridgeCloseController(bridge: CursorSession): {
+export function createBridgeCloseController(
+  bridge: CursorSession,
+  options?: {
+    onCheckpointTimeout?: () => void;
+  },
+): {
   noteTurnEnded: () => void;
   noteCheckpoint: () => void;
+  hasTurnEnded: () => boolean;
+  hasCheckpoint: () => boolean;
   dispose: () => void;
 } {
   let turnEnded = false;
   let checkpointSeen = false;
   let closeTimer: NodeJS.Timeout | undefined;
+  let checkpointTimeoutNotified = false;
 
   const clearCloseTimer = () => {
     if (!closeTimer) return;
@@ -23,6 +31,12 @@ export function createBridgeCloseController(bridge: CursorSession): {
     scheduleBridgeEnd(bridge);
   };
 
+  const notifyCheckpointTimeout = () => {
+    if (checkpointTimeoutNotified) return;
+    checkpointTimeoutNotified = true;
+    options?.onCheckpointTimeout?.();
+  };
+
   return {
     noteTurnEnded() {
       turnEnded = true;
@@ -32,13 +46,24 @@ export function createBridgeCloseController(bridge: CursorSession): {
       }
 
       clearCloseTimer();
-      closeTimer = setTimeout(closeBridge, TURN_END_GRACE_MS);
+      closeTimer = setTimeout(() => {
+        if (!checkpointSeen) {
+          notifyCheckpointTimeout();
+        }
+        closeBridge();
+      }, CHECKPOINT_WAIT_AFTER_TURN_END_MS);
     },
     noteCheckpoint() {
       checkpointSeen = true;
       if (turnEnded) {
         closeBridge();
       }
+    },
+    hasTurnEnded() {
+      return turnEnded;
+    },
+    hasCheckpoint() {
+      return checkpointSeen;
     },
     dispose() {
       clearCloseTimer();

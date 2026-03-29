@@ -91,12 +91,29 @@ async function collectFullResponse(
     accessToken,
     payload.requestBytes,
   );
-  const bridgeCloseController = createBridgeCloseController(bridge);
+  const checkpointTimeoutMessage =
+    "Cursor ended the turn before sending a conversation checkpoint. Aborting instead of continuing without resumable state.";
+  const bridgeCloseController = createBridgeCloseController(bridge, {
+    onCheckpointTimeout: () => {
+      if (!endStreamError) {
+        endStreamError = new Error(checkpointTimeoutMessage);
+      }
+      logPluginError(
+        "Cursor checkpoint did not arrive before turn-end timeout",
+        {
+          modelId,
+          convKey,
+          pendingToolCallIds: pendingToolCalls.map((call) => call.id),
+        },
+      );
+    },
+  });
   const state: StreamState = {
     toolCallIndex: 0,
     pendingExecs: [],
     outputTokens: 0,
     totalTokens: 0,
+    checkpointSeen: false,
   };
   const tagFilter = createThinkingTagFilter();
 
@@ -149,7 +166,10 @@ async function collectFullResponse(
             },
             () => {
               bridgeCloseController.noteTurnEnded();
-              if (pendingToolCalls.length > 0) {
+              if (
+                pendingToolCalls.length > 0 &&
+                bridgeCloseController.hasCheckpoint()
+              ) {
                 scheduleBridgeEnd(bridge);
               }
             },

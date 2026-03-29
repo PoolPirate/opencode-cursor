@@ -73,7 +73,9 @@ function createBridgeStreamResponse(
   const completionId = `chatcmpl-${crypto.randomUUID().replace(/-/g, "").slice(0, 28)}`;
   const created = Math.floor(Date.now() / 1000);
   let keepaliveTimer: NodeJS.Timeout | undefined;
-  const bridgeCloseController = createBridgeCloseController(bridge);
+  let bridgeCloseController:
+    | ReturnType<typeof createBridgeCloseController>
+    | undefined;
 
   const stopKeepalive = () => {
     if (!keepaliveTimer) return;
@@ -90,6 +92,7 @@ function createBridgeStreamResponse(
         pendingExecs: [],
         outputTokens: 0,
         totalTokens: 0,
+        checkpointSeen: false,
       };
       const tagFilter = createThinkingTagFilter();
       let assistantText = metadata.assistantSeedText ?? "";
@@ -97,6 +100,26 @@ function createBridgeStreamResponse(
       let endStreamError: Error | null = null;
       let toolCallsFlushed = false;
       const streamedToolCalls = new Map<string, StreamedToolCallState>();
+      const checkpointTimeoutMessage =
+        "Cursor ended the turn before sending a conversation checkpoint. Aborting instead of continuing without resumable state.";
+      bridgeCloseController = createBridgeCloseController(bridge, {
+        onCheckpointTimeout: () => {
+          if (!endStreamError) {
+            endStreamError = new Error(checkpointTimeoutMessage);
+          }
+          logPluginError("Cursor checkpoint did not arrive before turn-end timeout", {
+            modelId,
+            bridgeKey,
+            convKey,
+            pendingExecToolCallIds: sortedIds(
+              state.pendingExecs.map((exec) => exec.toolCallId),
+            ),
+            toolCallsFlushed,
+            mcpExecReceived,
+          });
+        },
+      });
+      const bridgeController = bridgeCloseController;
 
       const sendSSE = (data: object) => {
         if (closed) return;
@@ -214,6 +237,18 @@ function createBridgeStreamResponse(
       };
       const publishPendingToolCalls = (source: "checkpoint" | "turnEnded" | "endStream") => {
         if (closed || toolCallsFlushed || state.pendingExecs.length === 0) return;
+        if (!bridgeController.hasCheckpoint()) {
+          logPluginError("Refusing to publish Cursor tool calls before checkpoint", {
+            modelId,
+            bridgeKey,
+            convKey,
+            source,
+            pendingExecToolCallIds: sortedIds(
+              state.pendingExecs.map((exec) => exec.toolCallId),
+            ),
+          });
+          return;
+        }
 
         logPluginInfo("Evaluating Cursor tool-call publish", {
           modelId,
@@ -496,7 +531,7 @@ function createBridgeStreamResponse(
                 });
                 updateConversationCheckpoint(convKey, checkpointBytes);
                 sendUsageChunkIfChanged();
-                bridgeCloseController.noteCheckpoint();
+                bridgeController.noteCheckpoint();
                 if (state.pendingExecs.length > 0 && !toolCallsFlushed) {
                   publishPendingToolCalls("checkpoint");
                 }
@@ -511,8 +546,12 @@ function createBridgeStreamResponse(
                     state.pendingExecs.map((candidate) => candidate.toolCallId),
                   ),
                 });
-                bridgeCloseController.noteTurnEnded();
-                if (state.pendingExecs.length > 0 && !toolCallsFlushed) {
+                bridgeController.noteTurnEnded();
+                if (
+                  state.pendingExecs.length > 0 &&
+                  !toolCallsFlushed &&
+                  bridgeController.hasCheckpoint()
+                ) {
                   publishPendingToolCalls("turnEnded");
                 }
               },
@@ -556,7 +595,11 @@ function createBridgeStreamResponse(
             convKey,
             byteLength: endStreamBytes.length,
           });
-          if (state.pendingExecs.length > 0 && !toolCallsFlushed) {
+          if (
+            state.pendingExecs.length > 0 &&
+            !toolCallsFlushed &&
+            bridgeController.hasCheckpoint()
+          ) {
             publishPendingToolCalls("endStream");
           }
           endStreamError = parseConnectEndStream(endStreamBytes);
@@ -608,7 +651,7 @@ function createBridgeStreamResponse(
           ),
           storedActiveBridgeDiagnostics: activeBridges.get(bridgeKey)?.diagnostics,
         });
-        bridgeCloseController.dispose();
+        bridgeController.dispose();
         clearInterval(heartbeatTimer);
         stopKeepalive();
         syncStoredBlobStore(convKey, blobStore);
@@ -647,7 +690,7 @@ function createBridgeStreamResponse(
       });
     },
     cancel(reason) {
-      bridgeCloseController.dispose();
+      bridgeCloseController?.dispose();
       stopKeepalive();
       clearInterval(heartbeatTimer);
       syncStoredBlobStore(convKey, blobStore);

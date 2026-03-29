@@ -5,4 +5,5 @@ export interface StreamState {
   pendingExecs: PendingExec[];
   outputTokens: number;
   totalTokens: number;
+  checkpointSeen: boolean;
 }
