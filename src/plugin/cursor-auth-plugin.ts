@@ -22,6 +22,7 @@ import { getCursorModels, type CursorModel } from "../models";
 import {
   buildCursorProviderModels,
   buildDisabledProviderConfig,
+  type ProviderWithModels,
   setProviderModels,
   stripAuthorizationHeader,
 } from "../provider/models";
@@ -30,13 +31,32 @@ import { startProxy, stopProxy } from "../proxy";
 let lastModelDiscoveryError: string | null = null;
 const PLUGIN_ID = "@playwo/opencode-cursor-oauth";
 
+interface MutableConfig {
+  provider?: Record<string, { name?: string; models?: Record<string, unknown> }>;
+}
+
 export const server: Plugin = async (
   input: PluginInput,
   _options?: PluginOptions,
 ): Promise<Hooks> => {
   configurePluginLogger(input);
 
-  return {
+  const hooks = {
+    async config(config) {
+      const mutableConfig = config as MutableConfig;
+      mutableConfig.provider ??= {};
+      mutableConfig.provider[CURSOR_PROVIDER_ID] ??= {
+        name: "Cursor",
+      };
+    },
+
+    provider: {
+      id: CURSOR_PROVIDER_ID,
+      async models(provider: ProviderWithModels) {
+        return (provider.models as Record<string, unknown> | undefined) ?? {};
+      },
+    },
+
     auth: {
       provider: CURSOR_PROVIDER_ID,
 
@@ -163,7 +183,14 @@ export const server: Plugin = async (
         output.headers["x-opencode-agent"] = incoming.agent;
       }
     },
+  } as Hooks & {
+    provider: {
+      id: string;
+      models(provider: ProviderWithModels): Promise<Record<string, unknown>>;
+    };
   };
+
+  return hooks;
 };
 
 export const CursorAuthPlugin = server;
