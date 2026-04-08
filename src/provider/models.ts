@@ -2,6 +2,8 @@ import { CURSOR_PROVIDER_ID } from "../constants";
 import type { CursorModel } from "../models";
 import { estimateModelCost } from "./model-cost";
 
+const SDK_WRAPPER_PATH = new URL("../sdk-wrapper.js", import.meta.url).href;
+
 export interface ProviderWithModels {
   models?: Record<string, unknown>;
 }
@@ -27,7 +29,7 @@ export function buildCursorProviderModels(
         api: {
           id: model.id,
           url: `http://localhost:${port}/v1`,
-          npm: "@ai-sdk/openai-compatible",
+          npm: SDK_WRAPPER_PATH,
         },
         name: model.name,
         capabilities: {

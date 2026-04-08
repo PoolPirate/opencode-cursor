@@ -134,7 +134,7 @@ async function collectFullResponse(
             state,
             (text, isThinking) => {
               if (isThinking) return;
-              const { content } = tagFilter.process(text);
+              const { content, reasoning } = tagFilter.process(text);
               fullText += content;
             },
             (exec) => {
