@@ -70,9 +70,8 @@ function logPlugin(
 ): void {
   const serializedExtra = serializeValue(extra, 0) as Record<string, unknown>;
 
-  writeConsoleLog(level, message, serializedExtra);
-
   if (!currentLogger?.client?.app?.log) {
+    writeConsoleLog(level, message, serializedExtra);
     return;
   }
 
