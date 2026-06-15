@@ -1,3 +1,6 @@
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import type {
   Hooks,
   Plugin,
@@ -109,7 +112,10 @@ export const server: Plugin = async (
             return currentAuth.access;
           }, models);
 
-          setProviderModels(provider, buildCursorProviderModels(models, port));
+          const builtModels = buildCursorProviderModels(models, port);
+          setProviderModels(provider, builtModels);
+
+          writeProviderConfig(input.directory, builtModels, port).catch(() => {});
 
           return {
             baseURL: `http://localhost:${port}/v1`,
@@ -195,6 +201,36 @@ export const CursorAuthPluginModule: PluginModule = {
   id: PLUGIN_ID,
   server,
 };
+
+async function writeProviderConfig(
+  projectDir: string,
+  models: Record<string, unknown>,
+  port: number,
+): Promise<void> {
+  const projectPath = join(projectDir, ".opencode", "opencode.json");
+  const configHome = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
+  const globalPath = join(configHome, "opencode", "opencode.json");
+
+  const configPath = await access(projectPath).then(() => projectPath).catch(() => globalPath);
+  await mkdir(join(configPath, ".."), { recursive: true });
+
+  let existing: Record<string, unknown> = {};
+  try {
+    const raw = await readFile(configPath, "utf-8");
+    existing = JSON.parse(raw) as Record<string, unknown>;
+  } catch {}
+
+  const providerEntry = {
+    name: "Cursor",
+    api: `http://localhost:${port}/v1`,
+    models,
+  };
+
+  existing.provider ??= {};
+  (existing.provider as Record<string, unknown>)[CURSOR_PROVIDER_ID] = providerEntry;
+
+  await writeFile(configPath, JSON.stringify(existing, null, 2), "utf-8");
+}
 
 async function showDiscoveryFailureToast(
   input: PluginInput,
